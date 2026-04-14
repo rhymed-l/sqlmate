@@ -1,0 +1,84 @@
+<h2>主题强调色</h2>
+<p class="subtitle">深色/浅色双模式下的主色调，影响按钮、选中态、高亮等</p>
+
+<div class="cards">
+
+  <!-- Option A: 紫蓝渐变 -->
+  <div class="card" data-choice="purple-blue" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f1117;border-radius:8px;padding:14px;font-family:monospace;font-size:10px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <div style="background:linear-gradient(135deg,#7c8cf8,#a78bfa);border-radius:5px;padding:5px 14px;color:#fff;font-size:10px;font-weight:600;">执行合并</div>
+        <div style="background:#7c8cf820;border:1px solid #7c8cf840;border-radius:5px;padding:5px 12px;color:#7c8cf8;font-size:10px;">复制</div>
+      </div>
+      <div style="background:#1a1d2e;border:1px solid #7c8cf8;border-radius:5px;padding:8px;">
+        <div style="color:#a78bfa;font-size:9px;">-- 步骤 2：配置参数</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+          <span style="color:#abb2bf;">每批：</span>
+          <span style="background:#0f1117;border:1px solid #7c8cf8;border-radius:3px;padding:1px 8px;color:#7c8cf8;">1000</span>
+        </div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:5px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,#7c8cf8,#a78bfa);"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#2d3250;"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#2d3250;"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>紫蓝渐变</h3>
+      <p>科技感强，开发工具气质，类似 GitHub Copilot / Linear。</p>
+    </div>
+  </div>
+
+  <!-- Option B: 青绿 -->
+  <div class="card" data-choice="cyan-green" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0d1117;border-radius:8px;padding:14px;font-family:monospace;font-size:10px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <div style="background:linear-gradient(135deg,#06b6d4,#10b981);border-radius:5px;padding:5px 14px;color:#fff;font-size:10px;font-weight:600;">执行合并</div>
+        <div style="background:#06b6d420;border:1px solid #06b6d440;border-radius:5px;padding:5px 12px;color:#06b6d4;font-size:10px;">复制</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #06b6d4;border-radius:5px;padding:8px;">
+        <div style="color:#10b981;font-size:9px;">-- 步骤 2：配置参数</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+          <span style="color:#8b949e;">每批：</span>
+          <span style="background:#0d1117;border:1px solid #06b6d4;border-radius:3px;padding:1px 8px;color:#06b6d4;">1000</span>
+        </div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:5px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,#06b6d4,#10b981);"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#21262d;"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#21262d;"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>青绿</h3>
+      <p>清爽专业，数据工具常见配色，类似 Supabase / PlanetScale。</p>
+    </div>
+  </div>
+
+  <!-- Option C: 橙琥珀 -->
+  <div class="card" data-choice="orange-amber" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f0e0c;border-radius:8px;padding:14px;font-family:monospace;font-size:10px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <div style="background:linear-gradient(135deg,#f59e0b,#ef4444);border-radius:5px;padding:5px 14px;color:#fff;font-size:10px;font-weight:600;">执行合并</div>
+        <div style="background:#f59e0b20;border:1px solid #f59e0b40;border-radius:5px;padding:5px 12px;color:#f59e0b;font-size:10px;">复制</div>
+      </div>
+      <div style="background:#1a1712;border:1px solid #f59e0b;border-radius:5px;padding:8px;">
+        <div style="color:#fbbf24;font-size:9px;">-- 步骤 2：配置参数</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+          <span style="color:#a8a29e;">每批：</span>
+          <span style="background:#0f0e0c;border:1px solid #f59e0b;border-radius:3px;padding:1px 8px;color:#f59e0b;">1000</span>
+        </div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:5px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#ef4444);"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#292524;"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#292524;"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>橙琥珀</h3>
+      <p>温暖醒目，个性鲜明，类似 Raycast / Bear。辨识度高，不易与其他工具混淆。</p>
+    </div>
+  </div>
+
+</div>

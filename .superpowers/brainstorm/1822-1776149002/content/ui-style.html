@@ -1,0 +1,97 @@
+<h2>SQLMate 整体风格选择</h2>
+<p class="subtitle">选择一个最符合你预期质感的 UI 风格方向</p>
+
+<div class="cards">
+
+  <!-- Option A: Dark Pro -->
+  <div class="card" data-choice="dark-pro" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f1117;padding:16px;border-radius:8px;font-family:monospace;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:#ff5f57"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#febc2e"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:#28c840"></div>
+        <span style="color:#555;font-size:11px;margin-left:4px;">SQLMate</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <div style="background:#1e2130;border-radius:6px;padding:6px 14px;color:#7c8cf8;font-size:12px;border:1px solid #2d3250;">合并</div>
+        <div style="background:#1a1d2e;border-radius:6px;padding:6px 14px;color:#555;font-size:12px;">拆分</div>
+        <div style="background:#1a1d2e;border-radius:6px;padding:6px 14px;color:#555;font-size:12px;">分割</div>
+        <div style="background:#1a1d2e;border-radius:6px;padding:6px 14px;color:#555;font-size:12px;">格式化</div>
+      </div>
+      <div style="background:#1a1d2e;border-radius:6px;padding:10px;border:1px solid #2d3250;">
+        <div style="color:#7c8cf8;font-size:11px;margin-bottom:4px;">-- 输入 SQL</div>
+        <div style="color:#e06c75;font-size:11px;">INSERT INTO</div>
+        <span style="color:#98c379;font-size:11px;"> users</span>
+        <span style="color:#abb2bf;font-size:11px;"> (id, name)</span>
+      </div>
+      <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+        <div style="background:linear-gradient(135deg,#7c8cf8,#a78bfa);border-radius:5px;padding:5px 16px;color:#fff;font-size:11px;">执行合并</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Dark Pro</h3>
+      <p>深色主题，开发者工具质感，类似 VS Code / DataGrip。护眼，长时间使用舒适。</p>
+    </div>
+  </div>
+
+  <!-- Option B: Light Clean -->
+  <div class="card" data-choice="light-clean" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#f8fafc;padding:16px;border-radius:8px;font-family:system-ui;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <div style="width:28px;height:28px;border-radius:6px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;">
+          <span style="color:#fff;font-size:12px;font-weight:700;">S</span>
+        </div>
+        <span style="font-weight:600;color:#1e293b;font-size:13px;">SQLMate</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:10px;">
+        <div style="background:#3b82f6;border-radius:20px;padding:4px 14px;color:#fff;font-size:11px;">合并</div>
+        <div style="background:#fff;border-radius:20px;padding:4px 14px;color:#94a3b8;font-size:11px;border:1px solid #e2e8f0;">拆分</div>
+        <div style="background:#fff;border-radius:20px;padding:4px 14px;color:#94a3b8;font-size:11px;border:1px solid #e2e8f0;">分割</div>
+        <div style="background:#fff;border-radius:20px;padding:4px 14px;color:#94a3b8;font-size:11px;border:1px solid #e2e8f0;">格式化</div>
+      </div>
+      <div style="background:#fff;border-radius:8px;padding:10px;border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,.05);">
+        <div style="color:#94a3b8;font-size:11px;margin-bottom:4px;">输入你的 SQL 语句...</div>
+        <div style="color:#3b82f6;font-size:11px;">INSERT INTO</div>
+        <span style="color:#7c3aed;font-size:11px;"> users</span>
+        <span style="color:#475569;font-size:11px;"> (id, name)</span>
+      </div>
+      <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+        <div style="background:#3b82f6;border-radius:6px;padding:5px 16px;color:#fff;font-size:11px;box-shadow:0 2px 4px rgba(59,130,246,.3);">执行合并</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Light Clean</h3>
+      <p>亮色简洁风，现代 SaaS 质感，类似 Linear / Notion。清爽，适合白天使用。</p>
+    </div>
+  </div>
+
+  <!-- Option C: System Adaptive -->
+  <div class="card" data-choice="adaptive" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:linear-gradient(135deg,#0f1117 50%,#f8fafc 50%);padding:16px;border-radius:8px;font-family:system-ui;position:relative;overflow:hidden;">
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:80%;background:rgba(255,255,255,.15);"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div>
+          <div style="color:#7c8cf8;font-size:10px;margin-bottom:6px;">🌙 深色模式</div>
+          <div style="background:#1a1d2e;border-radius:5px;padding:7px;border:1px solid #2d3250;">
+            <div style="color:#e06c75;font-size:9px;">INSERT INTO</div>
+            <div style="color:#98c379;font-size:9px;"> users</div>
+          </div>
+          <div style="margin-top:5px;background:linear-gradient(135deg,#7c8cf8,#a78bfa);border-radius:4px;padding:3px 8px;color:#fff;font-size:9px;display:inline-block;">合并</div>
+        </div>
+        <div>
+          <div style="color:#3b82f6;font-size:10px;margin-bottom:6px;">☀️ 浅色模式</div>
+          <div style="background:#fff;border-radius:5px;padding:7px;border:1px solid #e2e8f0;">
+            <div style="color:#3b82f6;font-size:9px;">INSERT INTO</div>
+            <div style="color:#7c3aed;font-size:9px;"> users</div>
+          </div>
+          <div style="margin-top:5px;background:#3b82f6;border-radius:4px;padding:3px 8px;color:#fff;font-size:9px;display:inline-block;">合并</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>双模式自适应</h3>
+      <p>支持深色 / 浅色切换，跟随系统或手动切换。两种模式都精心设计。</p>
+    </div>
+  </div>
+
+</div>

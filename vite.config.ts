@@ -8,7 +8,13 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "./src") },
   },
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
+  },
   envPrefix: ["VITE_", "TAURI_"],
   test: {
     environment: "jsdom",

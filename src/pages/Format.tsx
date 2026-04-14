@@ -1,0 +1,102 @@
+import { useState } from "react";
+import { StepFlow } from "@/components/StepFlow";
+import { SqlEditor } from "@/components/SqlEditor";
+import { ResultPanel } from "@/components/ResultPanel";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { formatSQL, DIALECT_OPTIONS, type SqlDialect } from "@/lib/sql/format";
+
+export function Format() {
+  const [input, setInput] = useState("");
+  const [dialect, setDialect] = useState<SqlDialect>("mysql");
+  const [indent, setIndent] = useState<2 | 4>(2);
+  const [result, setResult] = useState<{ sql: string; meta?: string } | null>(null);
+
+  function handleExecute() {
+    const { sql, success, warning } = formatSQL(input, { dialect, indent });
+    setResult({ sql, meta: warning });
+    if (!success) console.warn(warning);
+  }
+
+  return (
+    <StepFlow
+      steps={[
+        {
+          number: 1,
+          label: "输入 SQL",
+          children: (
+            <SqlEditor
+              value={input}
+              onChange={setInput}
+              placeholder="粘贴任意 SQL 语句，或拖拽文件..."
+            />
+          ),
+        },
+        {
+          number: 2,
+          label: "配置参数",
+          children: (
+            <div className="flex items-center gap-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Label className="text-sm whitespace-nowrap">方言</Label>
+                <Select
+                  value={dialect}
+                  onValueChange={(v) => setDialect(v as SqlDialect)}
+                >
+                  <SelectTrigger className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DIALECT_OPTIONS.map(({ value, label }) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Label className="text-sm whitespace-nowrap">缩进</Label>
+                <Select
+                  value={String(indent)}
+                  onValueChange={(v) => setIndent(Number(v) as 2 | 4)}
+                >
+                  <SelectTrigger className="w-24">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2">2 空格</SelectItem>
+                    <SelectItem value="4">4 空格</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                onClick={handleExecute}
+                disabled={!input.trim()}
+                className="bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-600 hover:to-violet-600 text-white shadow-md shadow-indigo-500/20"
+              >
+                执行格式化
+              </Button>
+            </div>
+          ),
+        },
+        {
+          number: 3,
+          label: "查看结果",
+          children: result ? (
+            <ResultPanel content={result.sql} meta={result.meta} />
+          ) : (
+            <p className="text-sm text-muted-foreground">执行后结果将显示在这里...</p>
+          ),
+        },
+      ]}
+    />
+  );
+}

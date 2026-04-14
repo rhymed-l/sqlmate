@@ -1,51 +1,29 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { Sidebar } from "@/components/Sidebar";
+import { Merge } from "@/pages/Merge";
+import { Split } from "@/pages/Split";
+import { Segment } from "@/pages/Segment";
+import { Format } from "@/pages/Format";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type PageId = "merge" | "split" | "segment" | "format";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+const PAGES: Record<PageId, React.ComponentType> = {
+  merge: Merge,
+  split: Split,
+  segment: Segment,
+  format: Format,
+};
+
+export default function App() {
+  const [page, setPage] = useState<PageId>("merge");
+  const Page = PAGES[page];
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="flex h-screen bg-background text-foreground overflow-hidden select-none">
+      <Sidebar active={page} onNavigate={(id) => setPage(id as PageId)} />
+      <main className="flex-1 overflow-y-auto">
+        <Page />
+      </main>
+    </div>
   );
 }
-
-export default App;

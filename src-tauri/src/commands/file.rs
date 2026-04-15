@@ -650,3 +650,133 @@ pub async fn extract_by_tables(
         statement_count,
     })
 }
+
+// ─── streaming CSV export ──────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ExportStats {
+    pub table_count: usize,
+    pub row_count: usize,
+}
+
+/// Export all INSERT statements from a large SQL file to per-table CSV files.
+/// Streaming: O(one statement) memory regardless of file size.
+#[tauri::command]
+pub async fn export_to_csv_file(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_folder: String,
+) -> Result<ExportStats, String> {
+    let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
+    let reader = BufReader::new(file);
+
+    let mut table_writers: HashMap<String, BufWriter<File>> = HashMap::new();
+    let mut table_has_header: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut stmt_buf = String::new();
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut row_count: usize = 0;
+
+    // Explicit-parameter closure avoids mutable-capture borrow issues (same pattern as merge_file)
+    let process_export = |stmt: &str,
+                          table_writers: &mut HashMap<String, BufWriter<File>>,
+                          table_has_header: &mut std::collections::HashSet<String>,
+                          row_count: &mut usize,
+                          output_folder: &str|
+     -> Result<(), String> {
+        let h = match parse_insert_header(stmt) {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+        let tname = normalize_table_name(&h.table_expr);
+
+        if !table_writers.contains_key(&tname) {
+            let csv_path = Path::new(output_folder).join(format!("{}.csv", tname));
+            let f = File::create(&csv_path)
+                .map_err(|e| format!("创建 {}.csv 失败: {}", tname, e))?;
+            table_writers.insert(tname.clone(), BufWriter::new(f));
+        }
+
+        let writer = table_writers.get_mut(&tname).unwrap();
+
+        if !table_has_header.contains(&tname) && !h.columns.is_empty() {
+            let cols_inner = h.columns.trim_start_matches('(').trim_end_matches(')');
+            let header: Vec<String> = cols_inner
+                .split(',')
+                .map(|c| c.trim().trim_matches('`').to_string())
+                .collect();
+            let header_line = header
+                .iter()
+                .map(|c| csv_escape(c.as_str()))
+                .collect::<Vec<_>>()
+                .join(",");
+            writer.write_all(header_line.as_bytes()).map_err(|e| e.to_string())?;
+            writer.write_all(b"\r\n").map_err(|e| e.to_string())?;
+            table_has_header.insert(tname.clone());
+        }
+
+        let vals_bytes = stmt.as_bytes();
+        if let Some(vals_slice) = vals_bytes.get(h.values_offset..) {
+            let vals_slice = {
+                let mut end = vals_slice.len();
+                while end > 0
+                    && matches!(vals_slice[end - 1], b';' | b' ' | b'\t' | b'\r' | b'\n')
+                {
+                    end -= 1;
+                }
+                &vals_slice[..end]
+            };
+            for tuple in split_value_tuples(vals_slice) {
+                let csv_row = tuple_to_csv_row(tuple);
+                writer.write_all(csv_row.as_bytes()).map_err(|e| e.to_string())?;
+                writer.write_all(b"\r\n").map_err(|e| e.to_string())?;
+                *row_count += 1;
+            }
+        }
+        Ok(())
+    };
+
+    for line_result in reader.lines() {
+        let line = line_result.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        stmt_buf.push_str(&line);
+        stmt_buf.push('\n');
+
+        if line.trim_end().ends_with(';') {
+            let stmt = stmt_buf.trim().to_string();
+            stmt_buf.clear();
+            if !stmt.is_empty() {
+                process_export(
+                    &stmt,
+                    &mut table_writers,
+                    &mut table_has_header,
+                    &mut row_count,
+                    &output_folder,
+                )?;
+            }
+        }
+    }
+    let remaining = stmt_buf.trim().to_string();
+    if !remaining.is_empty() {
+        process_export(
+            &remaining,
+            &mut table_writers,
+            &mut table_has_header,
+            &mut row_count,
+            &output_folder,
+        )?;
+    }
+
+    // Flush all open writers
+    for (_, mut w) in table_writers {
+        w.flush().map_err(|e| e.to_string())?;
+    }
+
+    Ok(ExportStats {
+        table_count: table_has_header.len(),
+        row_count,
+    })
+}

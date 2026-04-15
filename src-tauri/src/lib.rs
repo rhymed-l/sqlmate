@@ -13,6 +13,7 @@ pub fn run() {
             commands::file::merge_file,
             commands::file::split_file,
             commands::file::extract_by_tables,
+            commands::file::export_to_csv_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

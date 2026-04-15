@@ -45,28 +45,31 @@ describe("extractTables", () => {
       "INSERT INTO orders (id) VALUES (10);",
       "INSERT INTO users (id) VALUES (2);",
     ].join("\n");
-    const result = extractTables(sql, ["users"]);
+    const { sql: result, count } = extractTables(sql, ["users"]);
     expect(result).toContain("INSERT INTO users");
     expect(result).not.toContain("INSERT INTO orders");
+    expect(count).toBe(2); // exactly 2 users statements
     const lines = result.split("\n").filter(Boolean);
-    expect(lines).toHaveLength(2); // exactly 2 users statements
+    expect(lines).toHaveLength(2);
   });
 
   it("is case-insensitive on table names", () => {
     const sql = "INSERT INTO Users (id) VALUES (1);";
-    const result = extractTables(sql, ["users"]);
+    const { sql: result } = extractTables(sql, ["users"]);
     expect(result).toContain("INSERT INTO Users");
   });
 
   it("strips backticks when matching", () => {
     const sql = "INSERT INTO `user_info` (id) VALUES (1);";
-    const result = extractTables(sql, ["user_info"]);
+    const { sql: result } = extractTables(sql, ["user_info"]);
     expect(result).toContain("INSERT INTO `user_info`");
   });
 
   it("returns empty string when no tables match", () => {
     const sql = "INSERT INTO users (id) VALUES (1);";
-    expect(extractTables(sql, ["orders"])).toBe("");
+    const { sql: result, count } = extractTables(sql, ["orders"]);
+    expect(result).toBe("");
+    expect(count).toBe(0);
   });
 
   it("handles multi-line statements (semicolon on last line)", () => {
@@ -74,7 +77,7 @@ describe("extractTables", () => {
       "INSERT INTO users (id, name) VALUES",
       "(1, 'Alice');",
     ].join("\n");
-    const result = extractTables(sql, ["users"]);
+    const { sql: result } = extractTables(sql, ["users"]);
     expect(result).toContain("INSERT INTO users");
     expect(result).toContain("'Alice'"); // body preserved
   });

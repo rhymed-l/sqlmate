@@ -117,14 +117,11 @@ export function Extract() {
         setError("请至少选择一张表");
         return;
       }
-      const sql = extractTables(input, selectedNames);
+      const { sql, count: stmtCount } = extractTables(input, selectedNames);
       if (!sql) {
         setError("未找到指定表名，请检查输入");
         return;
       }
-      const stmtCount = sql
-        .split("\n")
-        .filter((l) => l.trimEnd().endsWith(";")).length;
       setResult({
         sql,
         meta: `已抽取 ${selectedNames.length} 张表，共 ${stmtCount} 条语句`,
@@ -137,9 +134,8 @@ export function Extract() {
   }
 
   return (
-    <div className="flex flex-col p-6 max-w-3xl w-full gap-5">
-      <StepFlow
-        steps={[
+    <StepFlow
+      steps={[
           {
             number: 1,
             label: "输入 SQL",
@@ -283,6 +279,5 @@ export function Extract() {
           },
         ]}
       />
-    </div>
   );
 }

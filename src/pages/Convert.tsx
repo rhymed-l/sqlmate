@@ -171,14 +171,11 @@ function ExtractFlow() {
         setError("请至少选择一张表");
         return;
       }
-      const sql = extractTables(input, selectedNames);
+      const { sql, count: stmtCount } = extractTables(input, selectedNames);
       if (!sql) {
         setError("未找到指定表名，请检查输入");
         return;
       }
-      const stmtCount = sql
-        .split("\n")
-        .filter((l) => l.trimEnd().endsWith(";")).length;
       setResult({
         sql,
         meta: `已抽取 ${selectedNames.length} 张表，共 ${stmtCount} 条语句`,

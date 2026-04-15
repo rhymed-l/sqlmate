@@ -28,8 +28,8 @@ export function scanTables(sql: string): { name: string; count: number }[] {
   return Array.from(counts.entries()).map(([name, count]) => ({ name, count }));
 }
 
-/** Return only INSERT statements whose table is in `tables`. */
-export function extractTables(sql: string, tables: string[]): string {
+/** Return only INSERT statements whose table is in `tables`, plus the exact statement count. */
+export function extractTables(sql: string, tables: string[]): { sql: string; count: number } {
   const targetSet = new Set(tables.map((t) => t.toLowerCase().trim()));
   const lines = sql.split("\n");
   const results: string[] = [];
@@ -56,5 +56,5 @@ export function extractTables(sql: string, tables: string[]): string {
   const remaining = buf.trim();
   if (remaining) tryAppend(remaining);
 
-  return results.join("\n");
+  return { sql: results.join("\n"), count: results.length };
 }

@@ -910,6 +910,8 @@ pub async fn import_excel_to_sql(
             .collect::<Vec<_>>()
             .join(", ");
 
+        let safe_table = map.table_name.replace('`', "");
+
         for row in rows_iter {
             if row.iter().all(|c| *c == Data::Empty) {
                 continue;
@@ -933,7 +935,7 @@ pub async fn import_excel_to_sql(
             writeln!(
                 writer,
                 "INSERT INTO `{}` ({}) VALUES ({});",
-                map.table_name, col_list, val_list
+                safe_table, col_list, val_list
             )
             .map_err(|e| e.to_string())?;
             total_rows += 1;
@@ -962,6 +964,7 @@ pub async fn import_csv_to_sql(
     output_path: String,
     table_name: String,
 ) -> Result<ImportStats, String> {
+    let table_name = table_name.replace('`', "");
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
     let reader = BufReader::new(file);
@@ -980,7 +983,14 @@ pub async fn import_csv_to_sql(
         bytes_read += raw.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
 
-        let line = raw.trim_end_matches('\r');
+        // Strip CRLF and, on the very first content line, a UTF-8 BOM that
+        // Excel commonly prepends (appears as \u{FEFF} in the first field).
+        let stripped = raw.trim_end_matches('\r');
+        let line = if headers.is_none() {
+            stripped.trim_start_matches('\u{FEFF}')
+        } else {
+            stripped
+        };
         if line.is_empty() {
             continue;
         }

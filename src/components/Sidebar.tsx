@@ -1,4 +1,4 @@
-import { GitMerge, Scissors, Files, Sparkles, ArrowLeftRight, Sun, Moon } from "lucide-react";
+import { GitMerge, Scissors, Files, Sparkles, ArrowLeftRight, Filter, Sun, Moon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 
@@ -13,6 +13,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "split", label: "拆分", Icon: Scissors },
   { id: "segment", label: "分割", Icon: Files },
   { id: "format", label: "格式化", Icon: Sparkles },
+  { id: "extract", label: "抽取", Icon: Filter },
   { id: "convert", label: "转换", Icon: ArrowLeftRight },
 ];
 

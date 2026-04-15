@@ -4,15 +4,17 @@ import { Merge } from "@/pages/Merge";
 import { Split } from "@/pages/Split";
 import { Segment } from "@/pages/Segment";
 import { Format } from "@/pages/Format";
+import { Extract } from "@/pages/Extract";
 import { Convert } from "@/pages/Convert";
 
-type PageId = "merge" | "split" | "segment" | "format" | "convert";
+type PageId = "merge" | "split" | "segment" | "format" | "extract" | "convert";
 
 const PAGES: Record<PageId, React.ComponentType> = {
   merge: Merge,
   split: Split,
   segment: Segment,
   format: Format,
+  extract: Extract,
   convert: Convert,
 };
 

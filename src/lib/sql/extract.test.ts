@@ -48,6 +48,8 @@ describe("extractTables", () => {
     const result = extractTables(sql, ["users"]);
     expect(result).toContain("INSERT INTO users");
     expect(result).not.toContain("INSERT INTO orders");
+    const lines = result.split("\n").filter(Boolean);
+    expect(lines).toHaveLength(2); // exactly 2 users statements
   });
 
   it("is case-insensitive on table names", () => {
@@ -74,5 +76,6 @@ describe("extractTables", () => {
     ].join("\n");
     const result = extractTables(sql, ["users"]);
     expect(result).toContain("INSERT INTO users");
+    expect(result).toContain("'Alice'"); // body preserved
   });
 });

@@ -292,6 +292,7 @@ function ImportFlow() {
     setLargeResult(null);
     setError(null);
     setScanning(false);
+    setIsLarge(false);
 
     const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
     setFileName(name);
@@ -360,7 +361,7 @@ function ImportFlow() {
             "import_csv_to_sql",
             { inputPath: filePath, outputPath, tableName: tname }
           );
-          setLargeResult({ rowCount: stats.row_count, tableCount: 1, outputPath });
+          setLargeResult({ rowCount: stats.row_count, tableCount: stats.table_count, outputPath });
         } catch (e) {
           setError(`处理失败: ${e}`);
         } finally {
@@ -413,6 +414,7 @@ function ImportFlow() {
 
   const canExecute =
     !!filePath &&
+    fileType !== null &&
     !processing &&
     !scanning &&
     (fileType === "csv"

@@ -6,6 +6,10 @@ export interface TableData {
   rows: string[][];
 }
 
+// Note: table name case is preserved intentionally — it is used as the output filename
+// and Excel sheet name. Unlike extract.ts (which lowercases for matching), export.ts
+// preserves the original casing for display. Two INSERTs with different casing for the
+// same table will produce separate entries (matches MySQL Linux case-sensitive behavior).
 function normalizeTableName(raw: string): string {
   const stripped = raw.replace(/`/g, "");
   const parts = stripped.split(".");
@@ -81,23 +85,32 @@ function processStatement(stmt: string, tableMap: Map<string, TableData>): void 
 
   // Walk valuesRaw to find top-level tuples: (a,b),(c,d),...
   let depth = 0;
+  let inStr = false;
   let tupleStart = -1;
   for (let i = 0; i < valuesRaw.length; i++) {
     const ch = valuesRaw[i];
-    if (ch === "(") {
-      if (depth === 0) tupleStart = i;
-      depth++;
-    } else if (ch === ")") {
-      depth--;
-      if (depth === 0 && tupleStart !== -1) {
-        const tuple = valuesRaw.slice(tupleStart, i + 1);
-        const tokens = splitTupleTokens(tuple).map(parseSqlValue);
-        // Generate column names from first tuple if INSERT had no column list
-        if (td.columns.length === 0 && td.rows.length === 0) {
-          td.columns = tokens.map((_, idx) => `col${idx + 1}`);
+    if (inStr) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === "'" && valuesRaw[i + 1] === "'") { i++; continue; }
+      if (ch === "'") inStr = false;
+    } else {
+      if (ch === "'") {
+        inStr = true;
+      } else if (ch === "(") {
+        if (depth === 0) tupleStart = i;
+        depth++;
+      } else if (ch === ")") {
+        depth--;
+        if (depth === 0 && tupleStart !== -1) {
+          const tuple = valuesRaw.slice(tupleStart, i + 1);
+          const tokens = splitTupleTokens(tuple).map(parseSqlValue);
+          // Generate column names from first tuple if INSERT had no column list
+          if (td.columns.length === 0 && td.rows.length === 0) {
+            td.columns = tokens.map((_, idx) => `col${idx + 1}`);
+          }
+          td.rows.push(tokens);
+          tupleStart = -1;
         }
-        td.rows.push(tokens);
-        tupleStart = -1;
       }
     }
   }

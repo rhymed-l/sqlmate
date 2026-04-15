@@ -56,6 +56,29 @@ describe("parseInsertToRows", () => {
     const [table] = parseInsertToRows(sql);
     expect(table.rows).toHaveLength(2);
   });
+
+  it("correctly parses rows where string values contain parentheses", () => {
+    const sql = "INSERT INTO t (v) VALUES ('open (paren'), ('normal');";
+    const [table] = parseInsertToRows(sql);
+    expect(table.rows).toHaveLength(2);
+    expect(table.rows[0][0]).toBe("open (paren");
+    expect(table.rows[1][0]).toBe("normal");
+  });
+
+  it("handles CRLF line endings in input SQL", () => {
+    const sql = "INSERT INTO t (id) VALUES (1);\r\nINSERT INTO t (id) VALUES (2);";
+    const [table] = parseInsertToRows(sql);
+    expect(table.rows).toHaveLength(2);
+  });
+
+  it("treats differently-cased table names as separate tables", () => {
+    const sql = [
+      "INSERT INTO Users (id) VALUES (1);",
+      "INSERT INTO users (id) VALUES (2);",
+    ].join("\n");
+    const tables = parseInsertToRows(sql);
+    expect(tables).toHaveLength(2); // case-sensitive accumulation
+  });
 });
 
 describe("toCsv", () => {

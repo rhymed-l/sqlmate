@@ -117,7 +117,7 @@ pub struct ExtractStats {
 
 _小文件 CSV_：
 - 单表：触发浏览器下载 `{tableName}.csv`
-- 多表：触发多次下载（每表一个文件）
+- 多表：用 `JSZip` 打包为 `export.zip`，触发单次下载（内含每表一个 .csv 文件）
 - meta：共导出 N 张表，M 行数据
 
 _小文件 Excel_：
@@ -181,10 +181,11 @@ pub struct ExportStats {
 ## 新增依赖
 
 ```bash
-npm install xlsx
+npm install xlsx jszip
 ```
 
-SheetJS (`xlsx`) 仅在 `toXlsx()` 路径中使用，其他路径不引入。
+- `xlsx`（SheetJS）— 仅在 `toXlsx()` 路径中使用
+- `jszip` — 仅在多表 CSV 小文件下载路径中使用
 
 ---
 
@@ -210,7 +211,7 @@ SheetJS (`xlsx`) 仅在 `toXlsx()` 路径中使用，其他路径不引入。
 | 抽取时所有指定表名均未命中 | 提示「未找到指定表名，请检查输入」（不输出空文件） |
 | 导出时 INSERT 无列名 | CSV 无列名行，用 `col1, col2...` 兜底 |
 | Excel 大文件自动降级 | 内联警告，不阻断流程 |
-| 多表 CSV 下载（小文件）| 逐个触发下载，浏览器可能拦截多次下载，提示用户允许 |
+| 多表 CSV 下载（小文件）| JSZip 打包为 export.zip，单次下载，无浏览器拦截风险 |
 
 ---
 

@@ -65,4 +65,17 @@ describe("csvToSql", () => {
     // backticks in header stripped then re-added: `name`, `age`
     expect(sql).toContain("(`name`, `age`)");
   });
+
+  it("strips UTF-8 BOM from first column header", () => {
+    // Excel often saves CSV with a leading BOM character
+    const csv = "\uFEFFname,age\nAlice,30";
+    const sql = csvToSql(csv, "users");
+    expect(sql).toContain("(`name`, `age`)"); // BOM stripped, not part of column name
+  });
+
+  it("preserves text 'NULL' as string, only empty cell becomes SQL NULL", () => {
+    const csv = "val\nNULL\n";
+    const sql = csvToSql(csv, "t");
+    expect(sql).toContain("'NULL'"); // text NULL → quoted string
+  });
 });

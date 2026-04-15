@@ -6,10 +6,9 @@
 function parseCsvRow(row: string): string[] {
   const fields: string[] = [];
   let i = 0;
+  let lastWasSeparator = false;
 
-  while (i <= row.length) {
-    if (i === row.length) break;
-
+  while (i < row.length) {
     if (row[i] === '"') {
       // Quoted field
       i++; // skip opening quote
@@ -26,22 +25,29 @@ function parseCsvRow(row: string): string[] {
         }
       }
       fields.push(val);
-      if (row[i] === ",") i++; // skip comma after closing quote
+      if (row[i] === ",") {
+        i++; // skip comma after closing quote
+        lastWasSeparator = true;
+      } else {
+        lastWasSeparator = false;
+      }
     } else {
       // Unquoted field
       const commaIdx = row.indexOf(",", i);
       if (commaIdx === -1) {
         fields.push(row.slice(i));
+        lastWasSeparator = false;
         break;
       } else {
         fields.push(row.slice(i, commaIdx));
         i = commaIdx + 1;
+        lastWasSeparator = true;
       }
     }
   }
 
   // Trailing comma means a final empty field
-  if (row.endsWith(",")) fields.push("");
+  if (lastWasSeparator) fields.push("");
 
   return fields;
 }
@@ -53,7 +59,10 @@ function parseCsvRow(row: string): string[] {
  * - Single quotes in values are escaped as ''.
  */
 export function csvToSql(csvText: string, tableName: string): string {
-  const lines = csvText.split(/\r?\n/);
+  // Strip UTF-8 BOM if present
+  const text = csvText.replace(/^\uFEFF/, "");
+
+  const lines = text.split(/\r?\n/);
 
   // Remove trailing blank lines
   while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
@@ -66,6 +75,9 @@ export function csvToSql(csvText: string, tableName: string): string {
   const colList = headers
     .map((h) => `\`${h.replace(/`/g, "")}\``)
     .join(", ");
+
+  // Sanitize tableName by removing backticks
+  const safeTable = tableName.replace(/`/g, "");
 
   const stmts: string[] = [];
   for (let i = 1; i < lines.length; i++) {
@@ -81,7 +93,7 @@ export function csvToSql(csvText: string, tableName: string): string {
       .map((v) => (v === "" ? "NULL" : `'${v.replace(/'/g, "''")}'`))
       .join(", ");
 
-    stmts.push(`INSERT INTO \`${tableName}\` (${colList}) VALUES (${valList});`);
+    stmts.push(`INSERT INTO \`${safeTable}\` (${colList}) VALUES (${valList});`);
   }
 
   return stmts.join("\n");

@@ -1,3 +1,4 @@
+use calamine::{open_workbook, Data, Reader, Xlsx};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -778,5 +779,250 @@ pub async fn export_to_csv_file(
     Ok(ExportStats {
         table_count: table_has_header.len(),
         row_count,
+    })
+}
+
+// ─── CSV line parser ───────────────────────────────────────────────────────
+
+/// Parse a single CSV line per RFC 4180 (handles quoted fields with embedded
+/// commas and "" double-quote escaping). Does not handle multi-line quoted
+/// fields — callers split on newlines first.
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let bytes = line.as_bytes();
+    let mut fields: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let mut last_was_separator = false;
+
+    while i < bytes.len() {
+        last_was_separator = false;
+        if bytes[i] == b'"' {
+            // Quoted field
+            i += 1;
+            let mut val: Vec<u8> = Vec::new();
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        val.push(b'"');
+                        i += 2;
+                    } else {
+                        i += 1; // skip closing quote
+                        break;
+                    }
+                } else {
+                    val.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            fields.push(String::from_utf8_lossy(&val).to_string());
+            if i < bytes.len() && bytes[i] == b',' {
+                last_was_separator = true;
+                i += 1;
+            }
+        } else {
+            // Unquoted field
+            let start = i;
+            while i < bytes.len() && bytes[i] != b',' {
+                i += 1;
+            }
+            fields.push(String::from_utf8_lossy(&bytes[start..i]).to_string());
+            if i < bytes.len() {
+                last_was_separator = true;
+                i += 1; // skip comma
+            }
+        }
+    }
+
+    // Trailing comma → trailing empty field
+    if last_was_separator {
+        fields.push(String::new());
+    }
+
+    fields
+}
+
+// ─── Excel sheet scanner ───────────────────────────────────────────────────
+
+/// Return the sheet names from an .xlsx file without reading cell data.
+#[tauri::command]
+pub async fn get_excel_sheets(input_path: String) -> Result<Vec<String>, String> {
+    let wb: Xlsx<_> =
+        open_workbook(&input_path).map_err(|e| format!("无法打开 Excel 文件: {}", e))?;
+    Ok(wb.sheet_names().to_vec())
+}
+
+// ─── Excel → SQL ───────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SheetTableMap {
+    pub sheet_name: String,
+    pub table_name: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ImportStats {
+    pub row_count: usize,
+    pub table_count: usize,
+}
+
+/// Convert an .xlsx file to SQL INSERT statements.
+/// Sheet row 1 = column headers; subsequent rows = data.
+/// Empty cells → NULL. All other values → single-quoted strings.
+/// Progress is emitted once per sheet.
+#[tauri::command]
+pub async fn import_excel_to_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    sheet_table_maps: Vec<SheetTableMap>,
+) -> Result<ImportStats, String> {
+    let mut wb: Xlsx<_> =
+        open_workbook(&input_path).map_err(|e| format!("无法打开 Excel 文件: {}", e))?;
+    let out =
+        File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
+    let mut writer = BufWriter::new(out);
+    let mut total_rows = 0usize;
+    let total_sheets = sheet_table_maps.len();
+
+    for (sheet_idx, map) in sheet_table_maps.iter().enumerate() {
+        let range = match wb.worksheet_range(&map.sheet_name) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(format!("读取 Sheet '{}' 失败: {}", map.sheet_name, e))
+            }
+        };
+
+        let mut rows_iter = range.rows();
+
+        let headers: Vec<String> = match rows_iter.next() {
+            Some(row) => row
+                .iter()
+                .map(|c: &Data| c.to_string().replace('`', ""))
+                .collect(),
+            None => continue,
+        };
+        if headers.is_empty() {
+            continue;
+        }
+
+        let col_list = headers
+            .iter()
+            .map(|h| format!("`{}`", h))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        for row in rows_iter {
+            if row.iter().all(|c| *c == Data::Empty) {
+                continue;
+            }
+
+            let val_list = (0..headers.len())
+                .map(|i| match row.get(i) {
+                    None | Some(Data::Empty) => "NULL".to_string(),
+                    Some(v) => {
+                        let s = v.to_string();
+                        if s.is_empty() {
+                            "NULL".to_string()
+                        } else {
+                            format!("'{}'", s.replace('\'', "''"))
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            writeln!(
+                writer,
+                "INSERT INTO `{}` ({}) VALUES ({});",
+                map.table_name, col_list, val_list
+            )
+            .map_err(|e| e.to_string())?;
+            total_rows += 1;
+        }
+
+        let percent = ((sheet_idx + 1) as f64 / total_sheets as f64 * 100.0) as u8;
+        app.emit("stream-progress", ProgressEvent { percent }).ok();
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+
+    Ok(ImportStats {
+        row_count: total_rows,
+        table_count: total_sheets,
+    })
+}
+
+// ─── CSV → SQL (streaming) ─────────────────────────────────────────────────
+
+/// Stream a large CSV file to SQL INSERT statements (O(1) memory per row).
+/// First line = column headers. Empty fields → NULL. Others → single-quoted strings.
+#[tauri::command]
+pub async fn import_csv_to_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    table_name: String,
+) -> Result<ImportStats, String> {
+    let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
+    let reader = BufReader::new(file);
+    let out =
+        File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
+    let mut writer = BufWriter::new(out);
+
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut row_count = 0usize;
+    let mut headers: Option<Vec<String>> = None;
+    let mut col_list = String::new();
+
+    for line_result in reader.lines() {
+        let raw = line_result.map_err(|e| e.to_string())?;
+        bytes_read += raw.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+
+        let fields = parse_csv_line(line);
+
+        if headers.is_none() {
+            col_list = fields
+                .iter()
+                .map(|h| format!("`{}`", h.replace('`', "")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            headers = Some(fields);
+            continue;
+        }
+
+        let hdr_count = headers.as_ref().unwrap().len();
+        let val_list = (0..hdr_count)
+            .map(|i| {
+                let v = fields.get(i).map(|s| s.as_str()).unwrap_or("");
+                if v.is_empty() {
+                    "NULL".to_string()
+                } else {
+                    format!("'{}'", v.replace('\'', "''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        writeln!(
+            writer,
+            "INSERT INTO `{}` ({}) VALUES ({});",
+            table_name, col_list, val_list
+        )
+        .map_err(|e| e.to_string())?;
+        row_count += 1;
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+
+    Ok(ImportStats {
+        row_count,
+        table_count: 1,
     })
 }

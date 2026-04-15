@@ -8,6 +8,11 @@ pub fn run() {
             commands::file::read_file,
             commands::file::write_file,
             commands::file::write_files_to_folder,
+            commands::file::segment_file,
+            commands::file::file_size,
+            commands::file::merge_file,
+            commands::file::split_file,
+            commands::file::extract_by_tables,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

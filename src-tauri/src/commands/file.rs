@@ -1895,3 +1895,79 @@ pub async fn convert_statements(
     writer.flush().map_err(|e| e.to_string())?;
     Ok(ConvertStmtStats { converted_count, skipped_count })
 }
+
+// ─── merge_sql_files ───────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct MergeFilesStats {
+    pub total_lines: usize,
+}
+
+#[tauri::command]
+pub async fn merge_sql_files(
+    app: tauri::AppHandle,
+    input_paths: Vec<String>,
+    output_path: String,
+    dedup_sets: bool,
+    add_separator: bool,
+) -> Result<MergeFilesStats, String> {
+    // Compute total bytes for progress
+    let total_bytes: u64 = input_paths
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut seen_sets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut total_lines = 0usize;
+
+    for (file_idx, input_path) in input_paths.iter().enumerate() {
+        if add_separator {
+            let fname = std::path::Path::new(input_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(input_path.as_str());
+            writeln!(writer, "-- === file: {} ===", fname)
+                .map_err(|e| e.to_string())?;
+            total_lines += 1;
+        }
+
+        let file = File::open(input_path).map_err(|e| e.to_string())?;
+        let reader = BufReader::new(file);
+
+        for line_res in reader.lines() {
+            let line = line_res.map_err(|e| e.to_string())?;
+            bytes_read += line.len() as u64 + 1;
+            emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+
+            let trimmed = line.trim_end();
+
+            // Dedup SET statements (e.g. SET NAMES utf8mb4)
+            if dedup_sets && trimmed.to_uppercase().trim_start().starts_with("SET ") {
+                let key = trimmed.to_string();
+                if seen_sets.contains(&key) {
+                    continue; // skip duplicate
+                }
+                seen_sets.insert(key);
+            }
+
+            // Skip empty separator lines between files (not at first file)
+            // to avoid double-blank-lines when files have trailing newlines.
+            // Only collapse: keep at most one consecutive blank line.
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            total_lines += 1;
+        }
+
+        // Blank line between files for readability (unless last file)
+        if file_idx < input_paths.len() - 1 {
+            writeln!(writer).map_err(|e| e.to_string())?;
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(MergeFilesStats { total_lines })
+}

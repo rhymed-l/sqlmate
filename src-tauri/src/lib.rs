@@ -22,6 +22,7 @@ pub fn run() {
             commands::file::offset_sql,
             commands::file::analyze_sql_file,
             commands::file::convert_statements,
+            commands::file::merge_sql_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

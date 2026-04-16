@@ -11,19 +11,14 @@ import { Rename } from "@/pages/Rename";
 import { Offset } from "@/pages/Offset";
 import { Stats } from "@/pages/Stats";
 import { ConvertStmt } from "@/pages/ConvertStmt";
+import { FileMerge } from "@/pages/FileMerge";
+import { Dialect } from "@/pages/Dialect";
+import { Diff } from "@/pages/Diff";
 
 type PageId =
-  | "merge"
-  | "split"
-  | "segment"
-  | "format"
-  | "extract"
-  | "convert"
-  | "dedupe"
-  | "rename"
-  | "offset"
-  | "stats"
-  | "convertstmt";
+  | "merge" | "split" | "segment" | "format" | "extract" | "convert"
+  | "dedupe" | "rename" | "offset" | "stats" | "convertstmt"
+  | "filemerge" | "dialect" | "diff";
 
 const PAGES: Record<PageId, React.ComponentType> = {
   merge: Merge,
@@ -37,6 +32,9 @@ const PAGES: Record<PageId, React.ComponentType> = {
   offset: Offset,
   stats: Stats,
   convertstmt: ConvertStmt,
+  filemerge: FileMerge,
+  dialect: Dialect,
+  diff: Diff,
 };
 
 export default function App() {

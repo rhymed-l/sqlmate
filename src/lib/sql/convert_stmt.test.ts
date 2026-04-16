@@ -108,3 +108,32 @@ describe("convertStatements — general", () => {
     expect(skippedCount).toBe(1);
   });
 });
+
+describe("convertStatements — insert_ignore mode", () => {
+  it("injects IGNORE keyword", () => {
+    const { sql, convertedCount } = convertStatements(baseInsert, { mode: "insert_ignore" });
+    expect(sql).toBe(
+      "INSERT IGNORE INTO `users` (`id`, `name`, `email`) VALUES (1, 'Alice', 'a@x.com');"
+    );
+    expect(convertedCount).toBe(1);
+  });
+
+  it("handles mixed case INSERT INTO", () => {
+    const line = "insert into `t` (`a`) VALUES (1);";
+    const { sql } = convertStatements(line, { mode: "insert_ignore" });
+    expect(sql).toMatch(/^INSERT IGNORE INTO/);
+  });
+
+  it("preserves non-INSERT lines", () => {
+    const mixed = "-- comment\n" + baseInsert;
+    const { sql, convertedCount } = convertStatements(mixed, { mode: "insert_ignore" });
+    expect(sql).toContain("-- comment");
+    expect(convertedCount).toBe(1);
+  });
+
+  it("does not require pkColumn", () => {
+    const { convertedCount, skippedCount } = convertStatements(baseInsert, { mode: "insert_ignore" });
+    expect(convertedCount).toBe(1);
+    expect(skippedCount).toBe(0);
+  });
+});

@@ -1975,6 +1975,17 @@ pub async fn convert_statements(
             if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
                 return (trimmed.to_string(), false, false);
             }
+            // insert_ignore: inject IGNORE keyword, no column parsing needed
+            if mode == "insert_ignore" {
+                if let Some(ins) = find_ci(trimmed, b"INSERT") {
+                    let after_ins = trimmed[ins + 6..].trim_start();
+                    if after_ins.as_bytes().get(..4).map_or(false, |w| w.eq_ignore_ascii_case(b"INTO")) {
+                        let into_end = trimmed.len() - after_ins.len() + 4;
+                        return (format!("INSERT IGNORE INTO{}", &trimmed[into_end..]), true, false);
+                    }
+                }
+                return (trimmed.to_string(), false, false);
+            }
             if let Some((table, Some(cols), values)) = parse_insert_parts(trimmed) {
                 let pk_idx = match cols.iter().position(|c| c.to_lowercase() == pk_col_name.to_lowercase()) {
                     Some(i) => i,

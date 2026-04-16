@@ -13,6 +13,7 @@ import { useStreamProgress } from "@/hooks/useStreamProgress";
 import { ProgressBar } from "@/components/ProgressBar";
 
 const MODE_OPTIONS: { value: ConvertMode; label: string; desc: string }[] = [
+  { value: "insert_ignore", label: "INSERT IGNORE", desc: "INSERT IGNORE INTO — 遇到主键/唯一键冲突时跳过（MySQL）" },
   { value: "update", label: "UPDATE", desc: "UPDATE table SET ... WHERE pk=val" },
   {
     value: "mysql_upsert",
@@ -46,7 +47,8 @@ export function ConvertStmt() {
   const { progress, startProgress } = useStreamProgress();
   const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
-  const canExecute = hasInput && !processing && pkColumn.trim() !== "";
+  const needsPk = mode !== "insert_ignore";
+  const canExecute = hasInput && !processing && (!needsPk || pkColumn.trim() !== "");
 
   function resetResults() {
     setResult(null);
@@ -155,31 +157,34 @@ export function ConvertStmt() {
                 ))}
               </div>
 
-              {/* PK column */}
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-muted-foreground">主键列名 *</p>
-                <Input
-                  value={pkColumn}
-                  onChange={(e) => setPkColumn(e.target.value)}
-                  placeholder="例如：id"
-                  className="font-mono text-sm max-w-xs"
-                />
-                <p className="text-xs text-muted-foreground">
-                  用于 WHERE 条件或 ON CONFLICT 子句，不区分大小写
-                </p>
-              </div>
+              {/* PK column + exclude — only needed for modes that rewrite values */}
+              {needsPk && (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">主键列名 *</p>
+                    <Input
+                      value={pkColumn}
+                      onChange={(e) => setPkColumn(e.target.value)}
+                      placeholder="例如：id"
+                      className="font-mono text-sm max-w-xs"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      用于 WHERE 条件或 ON CONFLICT 子句，不区分大小写
+                    </p>
+                  </div>
 
-              {/* Exclude columns */}
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-muted-foreground">排除列（可选）</p>
-                <Input
-                  value={excludeColumns}
-                  onChange={(e) => setExcludeColumns(e.target.value)}
-                  placeholder="created_at, deleted_at"
-                  className="font-mono text-sm max-w-xs"
-                />
-                <p className="text-xs text-muted-foreground">逗号分隔，这些列不参与 SET 更新</p>
-              </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">排除列（可选）</p>
+                    <Input
+                      value={excludeColumns}
+                      onChange={(e) => setExcludeColumns(e.target.value)}
+                      placeholder="created_at, deleted_at"
+                      className="font-mono text-sm max-w-xs"
+                    />
+                    <p className="text-xs text-muted-foreground">逗号分隔，这些列不参与 SET 更新</p>
+                  </div>
+                </>
+              )}
 
               <div className="flex items-center gap-3 flex-wrap">
                 <Button

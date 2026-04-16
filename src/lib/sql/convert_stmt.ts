@@ -1,6 +1,6 @@
 import { parseInsertLine } from "./dedupe";
 
-export type ConvertMode = "update" | "mysql_upsert" | "pg_upsert";
+export type ConvertMode = "update" | "mysql_upsert" | "pg_upsert" | "insert_ignore";
 
 export interface ConvertOptions {
   pkColumn?: string;    // primary key column name
@@ -117,8 +117,16 @@ export function convertStatements(sql: string, options: ConvertOptions): Convert
 
   const outputLines = lines.map((line) => {
     const trimmed = line.trimEnd();
-    if (!/^INSERT\s+INTO\s+/i.test(trimmed)) return trimmed;
+    if (!/INSERT/i.test(trimmed)) return trimmed;
 
+    // insert_ignore: just inject IGNORE, no pk resolution needed
+    if (options.mode === "insert_ignore") {
+      const replaced = trimmed.replace(/INSERT\s+INTO\s+/i, "INSERT IGNORE INTO ");
+      if (replaced !== trimmed) { convertedCount++; return replaced; }
+      return trimmed;
+    }
+
+    if (!/^INSERT\s+INTO\s+/i.test(trimmed)) return trimmed;
     const converted = convertLine(trimmed, options);
     if (converted !== null) {
       convertedCount++;

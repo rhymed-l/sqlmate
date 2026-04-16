@@ -17,6 +17,7 @@ pub fn run() {
             commands::file::get_excel_sheets,
             commands::file::import_excel_to_sql,
             commands::file::import_csv_to_sql,
+            commands::file::dedupe_sql,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,4 @@
-import { GitMerge, Scissors, Files, Sparkles, ArrowLeftRight, Filter, Sun, Moon } from "lucide-react";
+import { GitMerge, Scissors, Files, Sparkles, ArrowLeftRight, Filter, CopyMinus, Sun, Moon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
 
@@ -15,6 +15,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "format", label: "格式化", Icon: Sparkles },
   { id: "extract", label: "抽取", Icon: Filter },
   { id: "convert", label: "转换", Icon: ArrowLeftRight },
+  { id: "dedupe", label: "去重", Icon: CopyMinus },
 ];
 
 interface SidebarProps {

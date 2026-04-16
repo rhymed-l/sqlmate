@@ -6,8 +6,9 @@ import { Segment } from "@/pages/Segment";
 import { Format } from "@/pages/Format";
 import { Extract } from "@/pages/Extract";
 import { Convert } from "@/pages/Convert";
+import { Dedupe } from "@/pages/Dedupe";
 
-type PageId = "merge" | "split" | "segment" | "format" | "extract" | "convert";
+type PageId = "merge" | "split" | "segment" | "format" | "extract" | "convert" | "dedupe";
 
 const PAGES: Record<PageId, React.ComponentType> = {
   merge: Merge,
@@ -16,6 +17,7 @@ const PAGES: Record<PageId, React.ComponentType> = {
   format: Format,
   extract: Extract,
   convert: Convert,
+  dedupe: Dedupe,
 };
 
 export default function App() {

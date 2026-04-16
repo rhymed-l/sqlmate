@@ -1190,3 +1190,236 @@ pub async fn import_csv_to_sql(
         table_count: 1,
     })
 }
+
+// ─── dedupe_sql ────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct DedupeStats {
+    pub original_count: usize,
+    pub kept_count: usize,
+    pub removed_count: usize,
+}
+
+/// Extract the dedup key from a VALUES (...) string.
+/// Returns the raw token at `col_index` (0-based) or None.
+fn extract_key_from_values(values_str: &str, col_index: usize) -> Option<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let chars: Vec<char> = values_str.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // skip whitespace
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+
+        if chars[i] == '\'' {
+            // single-quoted string with '' escaping
+            let mut token = String::from("'");
+            i += 1;
+            loop {
+                if i >= chars.len() {
+                    break;
+                }
+                if chars[i] == '\'' {
+                    token.push('\'');
+                    i += 1;
+                    if i < chars.len() && chars[i] == '\'' {
+                        token.push('\'');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    token.push(chars[i]);
+                    i += 1;
+                }
+            }
+            tokens.push(token);
+        } else {
+            // unquoted token (NULL, number, identifier)
+            let mut token = String::new();
+            while i < chars.len() && chars[i] != ',' && !chars[i].is_whitespace() {
+                token.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(token);
+        }
+
+        // skip whitespace then comma
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == ',' {
+            i += 1;
+        }
+    }
+
+    tokens.into_iter().nth(col_index)
+}
+
+/// Parse one INSERT line to extract (table_name, key_value).
+/// Returns None for non-INSERT lines or parse failures.
+fn parse_insert_key(
+    line: &str,
+    key_column: Option<&str>,
+    key_col_index: Option<usize>, // 1-based
+) -> Option<(String, String)> {
+    // Crude but fast: look for INSERT INTO pattern
+    let upper = line.to_uppercase();
+    let into_pos = upper.find("INSERT")?;
+    let rest = &line[into_pos..];
+
+    // Skip "INSERT" then whitespace
+    let rest = rest[6..].trim_start();
+    if !rest.to_uppercase().starts_with("INTO") {
+        return None;
+    }
+    let rest = rest[4..].trim_start();
+
+    // Table name (optionally backtick-quoted)
+    let (table_name, rest) = if rest.starts_with('`') {
+        let end = rest[1..].find('`')? + 1;
+        (rest[1..end].to_string(), rest[end + 1..].trim_start())
+    } else {
+        let end = rest.find(|c: char| c.is_whitespace() || c == '(' || c == '`')?;
+        (rest[..end].to_string(), rest[end..].trim_start())
+    };
+
+    // Optional column list
+    let mut col_idx: Option<usize> = None;
+    let rest = if rest.starts_with('(') && !rest.to_uppercase().contains("VALUES") {
+        // Check if this is a column list (before VALUES)
+        let values_pos = rest.to_uppercase().find("VALUES")?;
+        let col_section = &rest[1..]; // skip opening '('
+        if let Some(close) = col_section.find(')') {
+            if close < values_pos {
+                // It's a column list
+                if let Some(col_name) = key_column {
+                    let cols: Vec<&str> = col_section[..close]
+                        .split(',')
+                        .map(|c| c.trim().trim_matches('`'))
+                        .collect();
+                    col_idx = cols
+                        .iter()
+                        .position(|c| c.eq_ignore_ascii_case(col_name));
+                }
+                rest[close + 2..].trim_start() // skip ') '
+            } else {
+                rest
+            }
+        } else {
+            rest
+        }
+    } else {
+        // No column list — use key_col_index
+        if let Some(idx) = key_col_index {
+            col_idx = Some(idx - 1); // convert 1-based to 0-based
+        }
+        rest
+    };
+
+    // Find VALUES (
+    let values_pos = rest.to_uppercase().find("VALUES")?;
+    let after_values = rest[values_pos + 6..].trim_start();
+    if !after_values.starts_with('(') {
+        return None;
+    }
+    let values_inner = &after_values[1..];
+    let close = values_inner.rfind(')')?;
+    let values_str = &values_inner[..close];
+
+    let effective_col_idx = col_idx?;
+    let key_val = extract_key_from_values(values_str, effective_col_idx)?;
+
+    Some((table_name, key_val))
+}
+
+#[tauri::command]
+pub async fn dedupe_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    key_column: Option<String>,
+    key_col_index: Option<usize>, // 1-based
+    keep_last: bool,
+) -> Result<DedupeStats, String> {
+    let total_bytes = std::fs::metadata(&input_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    // Pass 1: build map from (table, key_value) → line_number
+    let file1 = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader1 = BufReader::new(file1);
+    let mut key_to_line: HashMap<(String, String), usize> = HashMap::new();
+    let mut original_count = 0usize;
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+
+    for (line_no, line_res) in reader1.lines().enumerate() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+
+        let trimmed = line.trim_end();
+        let upper = trimmed.to_uppercase();
+        if !upper.contains("INSERT") {
+            continue;
+        }
+
+        if let Some((table, key)) = parse_insert_key(
+            trimmed,
+            key_column.as_deref(),
+            key_col_index,
+        ) {
+            original_count += 1;
+            let composite = (table, key);
+            if !key_to_line.contains_key(&composite) || keep_last {
+                key_to_line.insert(composite, line_no);
+            }
+        }
+    }
+
+    let kept_lines: std::collections::HashSet<usize> =
+        key_to_line.values().copied().collect();
+
+    // Pass 2: write kept lines
+    let file2 = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader2 = BufReader::new(file2);
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    bytes_read = 0;
+    last_percent = 0;
+    let mut kept_count = 0usize;
+
+    for (line_no, line_res) in reader2.lines().enumerate() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+
+        let trimmed = line.trim_end();
+        let upper = trimmed.to_uppercase();
+
+        if upper.contains("INSERT") && parse_insert_key(trimmed, key_column.as_deref(), key_col_index).is_some() {
+            if kept_lines.contains(&line_no) {
+                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+                kept_count += 1;
+            }
+        } else {
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+
+    let removed_count = original_count - kept_count;
+    Ok(DedupeStats {
+        original_count,
+        kept_count,
+        removed_count,
+    })
+}

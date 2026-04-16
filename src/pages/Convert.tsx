@@ -287,7 +287,6 @@ function ImportFlow() {
 
     setFilePath(path);
     setSheetMaps([]);
-    setCsvTableName("");
     setSmallResult(null);
     setLargeResult(null);
     setError(null);
@@ -300,6 +299,9 @@ function ImportFlow() {
     const type: "csv" | "xlsx" = ext === "xlsx" ? "xlsx" : "csv";
     setFileType(type);
 
+    // Pre-fill table name from filename (without extension)
+    const baseName = name.replace(/\.[^.]+$/, "");
+
     const size = await invoke<number>("file_size", { path });
     setIsLarge(size > 10 * 1024 * 1024);
 
@@ -309,12 +311,15 @@ function ImportFlow() {
         const sheets = await invoke<string[]>("get_excel_sheets", {
           inputPath: path,
         });
-        setSheetMaps(sheets.map((s) => ({ sheetName: s, tableName: "" })));
+        // Pre-fill each sheet's table name with the sheet name
+        setSheetMaps(sheets.map((s) => ({ sheetName: s, tableName: s })));
       } catch (e) {
         setError(`无法读取 Sheet 名称: ${e}`);
       } finally {
         setScanning(false);
       }
+    } else {
+      setCsvTableName(baseName);
     }
   }
 
@@ -458,19 +463,22 @@ function ImportFlow() {
           children: filePath ? (
             <div className="space-y-3">
               {fileType === "csv" ? (
-                <div className="flex items-center gap-2">
-                  <Label className="text-sm whitespace-nowrap">表名</Label>
-                  <Input
-                    value={csvTableName}
-                    onChange={(e) => setCsvTableName(e.target.value)}
-                    placeholder="users"
-                    className="w-48 font-mono text-sm"
-                  />
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <Label className="text-sm whitespace-nowrap">表名</Label>
+                    <Input
+                      value={csvTableName}
+                      onChange={(e) => setCsvTableName(e.target.value)}
+                      placeholder="users"
+                      className="w-48 font-mono text-sm"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">已根据文件名自动填写，请确认或修改</p>
                 </div>
               ) : sheetMaps.length > 0 ? (
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">
-                    为每个 Sheet 填写对应的表名：
+                    已根据 Sheet 名自动填写表名，请确认或修改：
                   </p>
                   {sheetMaps.map((map, idx) => (
                     <div key={map.sheetName} className="flex items-center gap-2">

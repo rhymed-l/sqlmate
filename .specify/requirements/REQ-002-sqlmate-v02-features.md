@@ -301,16 +301,50 @@ Sprint 6: F-11（方言转换） + F-12（SQL Diff）
 | F-02 batch INSERT / 数值检测 / noHeader | ✅ 已完成 | v1.2 |
 | F-03 按表名抽取 | ✅ 已完成 | v1.1 |
 | F-04 数据去重 | ✅ 已完成 | v1.3 |
-| F-05 数据脱敏 | ⬜ 待实现 | — |
-| F-06 表名/列名批量替换 | ⬜ 待实现 | — |
-| F-07 INSERT→UPDATE/UPSERT | ⬜ 待实现 | — |
-| F-08 主键 ID 偏移 | ⬜ 待实现 | — |
-| F-09 多文件合并 | ⬜ 待实现 | — |
-| F-10 文件统计分析 | ⬜ 待实现 | — |
-| F-11 方言转换 | ⬜ 待实现 | — |
-| F-12 SQL Diff | ⬜ 待实现 | — |
+| F-05 数据脱敏 | ✅ 已完成 | v1.7 |
+| F-06 表名/列名批量替换 | ✅ 已完成 | v1.4 |
+| F-07 INSERT→UPDATE/UPSERT | ✅ 已完成 | v1.4 |
+| F-08 主键 ID 偏移 | ✅ 已完成 | v1.4 |
+| F-09 多文件合并 | ✅ 已完成 | v1.5 |
+| F-10 文件统计分析 | ✅ 已完成 | v1.4 |
+| F-11 方言转换 | ✅ 已完成 | v1.5 |
+| F-12 SQL Diff | ✅ 已完成 | v1.5 |
 
 ## 变更记录
+
+### v1.7 — 2026-04-16 — F-05 数据脱敏
+
+- **分支**: master | **提交**: `5fd0b38`
+- **变更摘要**:
+  - `mask.ts`: 6种脱敏类型（phone/id_card/email/name/custom_mask/regex_replace）
+  - hash-seed 一致性：相同列+原始值 → 相同假数据，跨行保持一致
+  - `mask.test.ts`: 11个测试，全部通过
+  - `Mask.tsx`: StepFlow UI，动态规则列表，custom/regex 扩展输入
+  - Rust `mask_sql`: 流式处理 + HashMap cache 保持一致性，regex crate 支持正则替换
+
+### v1.6 — 2026-04-16 — F-09/F-11/F-12 三功能
+
+- **分支**: master | **提交**: `a903181`
+- **变更摘要**:
+  - F-09: `FileMerge.tsx` 多文件选择+排序 UI；Rust `merge_sql_files` 流式追加，去重 SET 语句
+  - F-11: `dialect.ts` 9条可开关 MySQL→PostgreSQL 转换规则；`Dialect.tsx` 规则勾选 UI
+  - F-12: `diff.ts` 两 Map 对比，added/removed/modified/unchanged 分类；`Diff.tsx` 左右双栏+行级 diff 卡片
+  - Sidebar 滚动导航扩展至 14 项
+
+### v1.5 — 2026-04-16 — F-06/F-07/F-08/F-10 四功能 + Sidebar 重构
+
+- **分支**: master | **提交**: `92e867a`
+- **变更摘要**:
+  - F-06: `rename.ts/Rename.tsx` — 表名精确/前缀替换、列名替换，Rust `rename_sql`（regex crate）
+  - F-07: `convert_stmt.ts/ConvertStmt.tsx` — INSERT → UPDATE/MySQL UPSERT/PG UPSERT，Rust `convert_statements`
+  - F-08: `offset.ts/Offset.tsx` — 数值列加偏移量，跳过非数值并警告，Rust `offset_sql`
+  - F-10: `stats.ts/Stats.tsx` — 每表行数/大小统计，输出 Markdown/CSV，Rust `analyze_sql_file`
+  - Rust 共享 `parse_insert_parts` + `tokenize_sql_values` helpers
+  - Sidebar 滚动导航，h-10 紧凑布局
+
+### v1.4 — 2026-04-16 — F-04 归档更新 + REQ 状态
+
+- **分支**: master | **提交**: `3ecc823`（参见 v1.3 详情）
 
 ### v1.3 — 2026-04-16 — F-04 数据去重
 

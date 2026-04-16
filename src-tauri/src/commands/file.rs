@@ -1423,3 +1423,475 @@ pub async fn dedupe_sql(
         removed_count,
     })
 }
+
+// ─── shared helpers ────────────────────────────────────────────────────────
+
+fn tokenize_sql_values(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() { i += 1; }
+        if i >= chars.len() { break; }
+        if chars[i] == '\'' {
+            let mut tok = String::from("'");
+            i += 1;
+            loop {
+                if i >= chars.len() { break; }
+                if chars[i] == '\'' {
+                    tok.push('\'');
+                    i += 1;
+                    if i < chars.len() && chars[i] == '\'' {
+                        tok.push('\'');
+                        i += 1;
+                    } else { break; }
+                } else {
+                    tok.push(chars[i]);
+                    i += 1;
+                }
+            }
+            tokens.push(tok);
+        } else {
+            let mut tok = String::new();
+            while i < chars.len() && chars[i] != ',' && !chars[i].is_whitespace() {
+                tok.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(tok);
+        }
+        while i < chars.len() && chars[i].is_whitespace() { i += 1; }
+        if i < chars.len() && chars[i] == ',' { i += 1; }
+    }
+    tokens
+}
+
+/// Parse INSERT INTO line → (table_name, Option<Vec<col>>, Vec<value>)
+fn parse_insert_parts(line: &str) -> Option<(String, Option<Vec<String>>, Vec<String>)> {
+    let upper = line.to_uppercase();
+    let insert_pos = upper.find("INSERT")?;
+    let rest = line[insert_pos + 6..].trim_start();
+    if !rest.to_uppercase().starts_with("INTO") { return None; }
+    let rest = rest[4..].trim_start();
+
+    // Table name
+    let (table, rest) = if rest.starts_with('`') {
+        let end = rest[1..].find('`')? + 1;
+        (rest[1..end].to_string(), rest[end + 1..].trim_start())
+    } else {
+        let end = rest.find(|c: char| c.is_whitespace() || c == '(')?;
+        (rest[..end].to_string(), rest[end..].trim_start())
+    };
+
+    let upper_rest = rest.to_uppercase();
+    let values_pos = upper_rest.find("VALUES")?;
+    let before_values = &rest[..values_pos];
+
+    let columns = if before_values.trim_start().starts_with('(') {
+        let inner = before_values.trim_start();
+        let close = inner.rfind(')')?;
+        let cols: Vec<String> = inner[1..close]
+            .split(',')
+            .map(|c| c.trim().trim_matches('`').to_string())
+            .collect();
+        Some(cols)
+    } else {
+        None
+    };
+
+    let after_values = rest[values_pos + 6..].trim_start();
+    if !after_values.starts_with('(') { return None; }
+    let inner = &after_values[1..];
+    let close = inner.rfind(')')?;
+    let values_str = &inner[..close];
+    let values = tokenize_sql_values(values_str);
+
+    Some((table, columns, values))
+}
+
+// ─── rename_sql ────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct RenameRuleInput {
+    pub rule_type: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct RenameStats {
+    pub replaced_count: usize,
+}
+
+fn apply_rename_line(line: &str, rules: &[RenameRuleInput]) -> (String, bool) {
+    let upper = line.to_uppercase();
+    if !upper.contains("INSERT") {
+        return (line.to_string(), false);
+    }
+    let mut result = line.to_string();
+    let mut modified = false;
+
+    for rule in rules {
+        if rule.from == rule.to || rule.from.is_empty() { continue; }
+        let escaped = regex::escape(&rule.from);
+        let new_line = match rule.rule_type.as_str() {
+            "table" => {
+                // Replace table name: INSERT INTO `from` or INSERT INTO from
+                let re_str = format!(
+                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
+                );
+                if let Ok(re) = regex::Regex::new(&re_str) {
+                    let to = rule.to.clone();
+                    re.replace(&result, move |caps: &regex::Captures| {
+                        format!("{}`{}`", &caps[1], to)
+                    }).to_string()
+                } else { result.clone() }
+            }
+            "prefix" => {
+                let re_str = format!(
+                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}([^`\s]*)`|(?<![`\w]){escaped}(\S*?)(?![`\w(]))"
+                );
+                if let Ok(re) = regex::Regex::new(&re_str) {
+                    let to = rule.to.clone();
+                    re.replace(&result, move |caps: &regex::Captures| {
+                        let pfx = &caps[1];
+                        let rest = caps.get(3).or(caps.get(4)).map_or("", |m| m.as_str());
+                        format!("{}`{}{}`", pfx, to, rest)
+                    }).to_string()
+                } else { result.clone() }
+            }
+            "column" => {
+                // Replace only inside the column list section (before VALUES)
+                let upper_res = result.to_uppercase();
+                if let Some(val_pos) = upper_res.find("VALUES") {
+                    let before_values = &result[..val_pos];
+                    if let Some(open) = before_values.find('(') {
+                        if let Some(close) = before_values.rfind(')') {
+                            let col_section = &before_values[open + 1..close];
+                            let re_str = format!(
+                                r"(?i)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
+                            );
+                            if let Ok(re) = regex::Regex::new(&re_str) {
+                                let to = rule.to.clone();
+                                let new_cols = re.replace_all(col_section, move |_caps: &regex::Captures| {
+                                    format!("`{}`", to)
+                                }).to_string();
+                                format!(
+                                    "{}{}{}{}",
+                                    &before_values[..open + 1],
+                                    new_cols,
+                                    &before_values[close..],
+                                    &result[val_pos..]
+                                )
+                            } else { result.clone() }
+                        } else { result.clone() }
+                    } else { result.clone() }
+                } else { result.clone() }
+            }
+            _ => result.clone(),
+        };
+        if new_line != result { modified = true; result = new_line; }
+    }
+    (result, modified)
+}
+
+#[tauri::command]
+pub async fn rename_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    rules: Vec<RenameRuleInput>,
+) -> Result<RenameStats, String> {
+    let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut replaced_count = 0usize;
+
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        let (new_line, modified) = apply_rename_line(line.trim_end(), &rules);
+        if modified { replaced_count += 1; }
+        writeln!(writer, "{}", new_line).map_err(|e| e.to_string())?;
+    }
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(RenameStats { replaced_count })
+}
+
+// ─── offset_sql ────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct OffsetRuleInput {
+    pub column: String,
+    pub col_index: Option<usize>,
+    pub offset: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct OffsetStats {
+    pub modified_count: usize,
+    pub skipped_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn offset_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    rules: Vec<OffsetRuleInput>,
+) -> Result<OffsetStats, String> {
+    let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut modified_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut warning_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        let trimmed = line.trim_end();
+
+        if let Some((table, columns, mut values)) = parse_insert_parts(trimmed) {
+            let mut line_modified = false;
+            let mut line_skipped = false;
+
+            for rule in &rules {
+                let idx = if !rule.column.is_empty() {
+                    if let Some(cols) = &columns {
+                        cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase())
+                    } else { rule.col_index.map(|i| i - 1) }
+                } else { rule.col_index.map(|i| i - 1) };
+
+                if let Some(i) = idx {
+                    if i >= values.len() { continue; }
+                    let raw = &values[i];
+                    if raw.starts_with('\'') {
+                        line_skipped = true;
+                        warning_set.insert(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
+                        continue;
+                    }
+                    if let Ok(n) = raw.parse::<i64>() {
+                        values[i] = (n + rule.offset).to_string();
+                        line_modified = true;
+                    } else if let Ok(f) = raw.parse::<f64>() {
+                        values[i] = format!("{}", f + rule.offset as f64);
+                        line_modified = true;
+                    } else {
+                        line_skipped = true;
+                        warning_set.insert(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
+                    }
+                }
+            }
+
+            if line_skipped { skipped_count += 1; }
+            if line_modified {
+                modified_count += 1;
+                let col_part = if let Some(cols) = &columns {
+                    format!(" ({})", cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "))
+                } else { String::new() };
+                writeln!(writer, "INSERT INTO `{}`{} VALUES ({});", table, col_part, values.join(", "))
+                    .map_err(|e| e.to_string())?;
+            } else {
+                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            }
+        } else {
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(OffsetStats {
+        modified_count,
+        skipped_count,
+        warnings: warning_set.into_iter().collect(),
+    })
+}
+
+// ─── analyze_sql_file ──────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct TableStatItem {
+    pub table_name: String,
+    pub row_count: usize,
+    pub estimated_bytes: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct SqlFileStats {
+    pub tables: Vec<TableStatItem>,
+    pub total_rows: usize,
+    pub total_statements: usize,
+    pub input_bytes: u64,
+    pub duration_ms: u64,
+}
+
+#[tauri::command]
+pub async fn analyze_sql_file(
+    app: tauri::AppHandle,
+    input_path: String,
+) -> Result<SqlFileStats, String> {
+    let start = std::time::Instant::now();
+    let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+
+    let mut table_map: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        let line_len = line.len() + 1;
+        bytes_read += line_len as u64;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        let trimmed = line.trim_end();
+        let upper = trimmed.to_uppercase();
+        if !upper.contains("INSERT") { continue; }
+
+        // Fast table name extraction
+        if let Some(m) = {
+            let re = regex::Regex::new(r"(?i)INSERT\s+INTO\s+`?([^`\s(]+)`?").ok();
+            re.and_then(|r| r.captures(trimmed))
+        } {
+            if let Some(tname) = m.get(1) {
+                let entry = table_map.entry(tname.as_str().to_string()).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += line_len;
+            }
+        }
+    }
+
+    let total_statements: usize = table_map.values().map(|(c, _)| c).sum();
+    let tables: Vec<TableStatItem> = table_map
+        .into_iter()
+        .map(|(name, (count, bytes))| TableStatItem {
+            table_name: name,
+            row_count: count,
+            estimated_bytes: bytes,
+        })
+        .collect();
+
+    Ok(SqlFileStats {
+        tables,
+        total_rows: total_statements,
+        total_statements,
+        input_bytes: total_bytes,
+        duration_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+// ─── convert_statements ────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ConvertStmtStats {
+    pub converted_count: usize,
+    pub skipped_count: usize,
+}
+
+#[tauri::command]
+pub async fn convert_statements(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    mode: String,
+    pk_column: String,
+    exclude_columns: Vec<String>,
+) -> Result<ConvertStmtStats, String> {
+    let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut converted_count = 0usize;
+    let mut skipped_count = 0usize;
+    let exclude_set: std::collections::HashSet<String> =
+        exclude_columns.iter().map(|c| c.to_lowercase()).collect();
+
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        let trimmed = line.trim_end();
+        let upper = trimmed.to_uppercase();
+
+        if !upper.contains("INSERT") {
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            continue;
+        }
+
+        if let Some((table, Some(cols), values)) = parse_insert_parts(trimmed) {
+            let pk_idx = cols.iter().position(|c| c.to_lowercase() == pk_column.to_lowercase());
+            let pk_idx = match pk_idx {
+                Some(i) => i,
+                None => {
+                    skipped_count += 1;
+                    writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+                    continue;
+                }
+            };
+
+            let pk_val = values.get(pk_idx).map(|s| s.as_str()).unwrap_or("NULL");
+            let pk_col = &cols[pk_idx];
+
+            let converted = match mode.as_str() {
+                "update" => {
+                    let set_parts: Vec<String> = cols.iter().enumerate()
+                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
+                        .map(|(i, c)| format!("`{}` = {}", c, values.get(i).map(|s| s.as_str()).unwrap_or("NULL")))
+                        .collect();
+                    if set_parts.is_empty() {
+                        skipped_count += 1;
+                        writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                    format!("UPDATE `{}` SET {} WHERE `{}` = {};", table, set_parts.join(", "), pk_col, pk_val)
+                }
+                "mysql_upsert" => {
+                    let col_list = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+                    let val_list = values.join(", ");
+                    let update_parts: Vec<String> = cols.iter().enumerate()
+                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
+                        .map(|(_, c)| format!("`{}` = VALUES(`{}`)", c, c))
+                        .collect();
+                    format!("INSERT INTO `{}` ({}) VALUES ({}) ON DUPLICATE KEY UPDATE {};",
+                        table, col_list, val_list, update_parts.join(", "))
+                }
+                "pg_upsert" | _ => {
+                    let col_list = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ");
+                    let val_list = values.join(", ");
+                    let update_parts: Vec<String> = cols.iter().enumerate()
+                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
+                        .map(|(_, c)| format!("\"{}\" = EXCLUDED.\"{}\"", c, c))
+                        .collect();
+                    format!("INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT (\"{}\") DO UPDATE SET {};",
+                        table, col_list, val_list, pk_col, update_parts.join(", "))
+                }
+            };
+
+            converted_count += 1;
+            writeln!(writer, "{}", converted).map_err(|e| e.to_string())?;
+        } else {
+            skipped_count += 1;
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(ConvertStmtStats { converted_count, skipped_count })
+}

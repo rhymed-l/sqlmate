@@ -18,6 +18,10 @@ pub fn run() {
             commands::file::import_excel_to_sql,
             commands::file::import_csv_to_sql,
             commands::file::dedupe_sql,
+            commands::file::rename_sql,
+            commands::file::offset_sql,
+            commands::file::analyze_sql_file,
+            commands::file::convert_statements,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

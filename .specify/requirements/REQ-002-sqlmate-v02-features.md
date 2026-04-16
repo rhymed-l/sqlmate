@@ -300,7 +300,7 @@ Sprint 6: F-11（方言转换） + F-12（SQL Diff）
 | F-02 CSV/Excel→SQL（基础版） | ✅ 已完成 | v1.1 |
 | F-02 batch INSERT / 数值检测 / noHeader | ✅ 已完成 | v1.2 |
 | F-03 按表名抽取 | ✅ 已完成 | v1.1 |
-| F-04 数据去重 | ⬜ 待实现 | — |
+| F-04 数据去重 | ✅ 已完成 | v1.3 |
 | F-05 数据脱敏 | ⬜ 待实现 | — |
 | F-06 表名/列名批量替换 | ⬜ 待实现 | — |
 | F-07 INSERT→UPDATE/UPSERT | ⬜ 待实现 | — |
@@ -311,6 +311,18 @@ Sprint 6: F-11（方言转换） + F-12（SQL Diff）
 | F-12 SQL Diff | ⬜ 待实现 | — |
 
 ## 变更记录
+
+### v1.3 — 2026-04-16 — F-04 数据去重
+
+- **分支**: master | **提交**: `3ecc823`
+- **变更摘要**:
+  - `dedupe.ts`: `parseSqlValues` / `parseInsertLine` / `dedupeSql` — 两轮扫描，per-table 去重
+  - 支持按列名（不区分大小写）或 1-based 列序号定位去重键
+  - keepLast 选项：保留最后一条（默认）或第一条；non-INSERT 行原样保留
+  - `dedupe.test.ts`: 20 个测试，全部通过（共 78 个）
+  - `Dedupe.tsx`: StepFlow 3 步 UI，小文件 JS 内联 + 大文件 Rust 流式 + 进度条
+  - Rust `dedupe_sql` 命令：两遍 IO + `HashMap<(table, key), line_no>`，支持 progress 事件
+  - Sidebar/App.tsx 新增"去重"导航入口（`CopyMinus` 图标）
 
 ### v1.2 — 2026-04-16 — F-02 功能补全
 

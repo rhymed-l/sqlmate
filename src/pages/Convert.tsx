@@ -267,6 +267,9 @@ function ImportFlow() {
   const [sheetMaps, setSheetMaps] = useState<SheetMap[]>([]);
   const [scanning, setScanning] = useState(false);
   const [csvTableName, setCsvTableName] = useState("");
+  const [noHeader, setNoHeader] = useState(false);
+  const [batchEnabled, setBatchEnabled] = useState(true);
+  const [batchSizeVal, setBatchSizeVal] = useState(1000);
   const [smallResult, setSmallResult] = useState<string | null>(null);
   const [largeResult, setLargeResult] = useState<{
     rowCount: number;
@@ -336,12 +339,19 @@ function ImportFlow() {
         return;
       }
 
+      const effectiveBatchSize = batchEnabled ? batchSizeVal : 0;
+
       if (!isLarge) {
         setProcessing(true);
         await new Promise((r) => setTimeout(r, 0));
         try {
           const text = await invoke<string>("read_file", { path: filePath });
-          const sql = csvToSql(text, tname);
+          const sql = csvToSql(text, {
+            tableName: tname,
+            noHeader,
+            batchSize: effectiveBatchSize,
+            detectNumeric: true,
+          });
           if (!sql) {
             setError("CSV 中没有数据行");
             return;
@@ -364,7 +374,14 @@ function ImportFlow() {
         try {
           const stats = await invoke<{ row_count: number; table_count: number }>(
             "import_csv_to_sql",
-            { inputPath: filePath, outputPath, tableName: tname }
+            {
+              inputPath: filePath,
+              outputPath,
+              tableName: tname,
+              noHeader,
+              batchSize: effectiveBatchSize,
+              detectNumeric: true,
+            }
           );
           setLargeResult({ rowCount: stats.row_count, tableCount: stats.table_count, outputPath });
         } catch (e) {
@@ -392,6 +409,7 @@ function ImportFlow() {
       setProcessing(true);
       const stopProgress = await startProgress();
       try {
+        const effectiveBatchSize = batchEnabled ? batchSizeVal : 0;
         const stats = await invoke<{ row_count: number; table_count: number }>(
           "import_excel_to_sql",
           {
@@ -401,6 +419,8 @@ function ImportFlow() {
               sheet_name: m.sheetName,
               table_name: m.tableName.trim(),
             })),
+            noHeader,
+            batchSize: effectiveBatchSize,
           }
         );
         setLargeResult({
@@ -500,6 +520,42 @@ function ImportFlow() {
                   ))}
                 </div>
               ) : null}
+              {/* Shared import options */}
+              <div className="flex flex-wrap gap-x-5 gap-y-2 pt-1">
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={noHeader}
+                    onChange={(e) => setNoHeader(e.target.checked)}
+                    className="accent-indigo-500"
+                  />
+                  无列名行
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={batchEnabled}
+                    onChange={(e) => setBatchEnabled(e.target.checked)}
+                    className="accent-indigo-500"
+                  />
+                  批量 INSERT
+                </label>
+                {batchEnabled && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">每批</span>
+                    <Input
+                      type="number"
+                      value={batchSizeVal}
+                      min={1}
+                      onChange={(e) =>
+                        setBatchSizeVal(Math.max(1, Number(e.target.value) || 1000))
+                      }
+                      className="w-20 h-7 font-mono text-sm px-2"
+                    />
+                    <span className="text-xs text-muted-foreground">行</span>
+                  </div>
+                )}
+              </div>
               <div className="flex items-center gap-3 flex-wrap">
                 <Button
                   onClick={handleExecute}

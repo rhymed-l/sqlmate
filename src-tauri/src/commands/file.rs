@@ -850,7 +850,7 @@ pub async fn get_excel_sheets(input_path: String) -> Result<Vec<String>, String>
     Ok(wb.sheet_names().to_vec())
 }
 
-// ─── Excel → SQL ───────────────────────────────────────────────────────────
+// ─── Shared import helpers ─────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 pub struct SheetTableMap {
@@ -864,9 +864,107 @@ pub struct ImportStats {
     pub table_count: usize,
 }
 
+/// Format a single Excel cell value as a SQL literal.
+/// Numeric types (Float/Bool) are output without quotes; strings → single-quoted.
+fn cell_to_sql(cell: &Data) -> String {
+    match cell {
+        Data::Empty => "NULL".to_string(),
+        Data::Error(_) => "NULL".to_string(),
+        Data::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        Data::Float(f) => {
+            // Output whole numbers without a decimal point (e.g. 30 not 30.0)
+            if f.fract() == 0.0 && f.abs() < 9.0e15 {
+                format!("{}", *f as i64)
+            } else {
+                format!("{}", f)
+            }
+        }
+        _ => {
+            let s = cell.to_string();
+            if s.is_empty() {
+                "NULL".to_string()
+            } else {
+                format!("'{}'", s.replace('\'', "''"))
+            }
+        }
+    }
+}
+
+/// Write a batch INSERT statement (multiple value rows in one statement).
+fn write_batch_insert(
+    writer: &mut impl Write,
+    table: &str,
+    col_list: &str,
+    rows: &[String],
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    writeln!(writer, "INSERT INTO `{}` ({}) VALUES", table, col_list)
+        .map_err(|e| e.to_string())?;
+    for (i, row) in rows.iter().enumerate() {
+        let suffix = if i + 1 < rows.len() { "," } else { ";" };
+        writeln!(writer, "  ({}){}", row, suffix).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Return true if s can be parsed as a finite f64 number.
+fn is_numeric_str(s: &str) -> bool {
+    s.parse::<f64>().map(|f| f.is_finite()).unwrap_or(false)
+}
+
+/// First-pass scan: determine which columns are entirely numeric.
+/// Reads the file once without writing any output.
+fn detect_numeric_cols(input_path: &str, no_header: bool) -> Result<Vec<bool>, String> {
+    let file = File::open(input_path).map_err(|e| format!("无法打开文件: {}", e))?;
+    let reader = BufReader::new(file);
+    let mut is_numeric: Vec<bool> = Vec::new();
+    let mut initialized = false;
+    let mut first_line = true;
+
+    for line_result in reader.lines() {
+        let raw = line_result.map_err(|e| e.to_string())?;
+        let stripped = raw.trim_end_matches('\r');
+        let line = if first_line {
+            stripped.trim_start_matches('\u{FEFF}')
+        } else {
+            stripped
+        };
+        first_line = false;
+
+        if line.is_empty() {
+            continue;
+        }
+
+        let fields = parse_csv_line(line);
+
+        if !initialized {
+            is_numeric = vec![true; fields.len()];
+            initialized = true;
+            if no_header {
+                // First line is data — fall through to check it
+            } else {
+                continue; // First line is header — skip
+            }
+        }
+
+        for (i, v) in fields.iter().enumerate() {
+            if i < is_numeric.len() && !v.is_empty() && !is_numeric_str(v) {
+                is_numeric[i] = false;
+            }
+        }
+    }
+
+    Ok(is_numeric)
+}
+
+// ─── Excel → SQL ───────────────────────────────────────────────────────────
+
 /// Convert an .xlsx file to SQL INSERT statements.
-/// Sheet row 1 = column headers; subsequent rows = data.
-/// Empty cells → NULL. All other values → single-quoted strings.
+/// - no_header: treat first row as data; use col1, col2, … as column names.
+/// - batch_size: rows per INSERT (0 = one row per INSERT).
+/// - Numeric cell types (Float, Bool) are written without quotes.
 /// Progress is emitted once per sheet.
 #[tauri::command]
 pub async fn import_excel_to_sql(
@@ -874,6 +972,8 @@ pub async fn import_excel_to_sql(
     input_path: String,
     output_path: String,
     sheet_table_maps: Vec<SheetTableMap>,
+    no_header: bool,
+    batch_size: usize,
 ) -> Result<ImportStats, String> {
     let mut wb: Xlsx<_> =
         open_workbook(&input_path).map_err(|e| format!("无法打开 Excel 文件: {}", e))?;
@@ -892,13 +992,19 @@ pub async fn import_excel_to_sql(
         };
 
         let mut rows_iter = range.rows();
+        let safe_table = map.table_name.replace('`', "");
 
-        let headers: Vec<String> = match rows_iter.next() {
-            Some(row) => row
-                .iter()
-                .map(|c: &Data| c.to_string().replace('`', ""))
-                .collect(),
-            None => continue,
+        let headers: Vec<String> = if no_header {
+            let (_, width) = range.get_size();
+            (1..=width).map(|i| format!("col{}", i)).collect()
+        } else {
+            match rows_iter.next() {
+                Some(row) => row
+                    .iter()
+                    .map(|c: &Data| c.to_string().replace('`', ""))
+                    .collect(),
+                None => continue,
+            }
         };
         if headers.is_empty() {
             continue;
@@ -910,7 +1016,7 @@ pub async fn import_excel_to_sql(
             .collect::<Vec<_>>()
             .join(", ");
 
-        let safe_table = map.table_name.replace('`', "");
+        let mut batch: Vec<String> = Vec::new();
 
         for row in rows_iter {
             if row.iter().all(|c| *c == Data::Empty) {
@@ -920,25 +1026,30 @@ pub async fn import_excel_to_sql(
             let val_list = (0..headers.len())
                 .map(|i| match row.get(i) {
                     None | Some(Data::Empty) => "NULL".to_string(),
-                    Some(v) => {
-                        let s = v.to_string();
-                        if s.is_empty() {
-                            "NULL".to_string()
-                        } else {
-                            format!("'{}'", s.replace('\'', "''"))
-                        }
-                    }
+                    Some(cell) => cell_to_sql(cell),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            writeln!(
-                writer,
-                "INSERT INTO `{}` ({}) VALUES ({});",
-                safe_table, col_list, val_list
-            )
-            .map_err(|e| e.to_string())?;
+            if batch_size == 0 {
+                writeln!(
+                    writer,
+                    "INSERT INTO `{}` ({}) VALUES ({});",
+                    safe_table, col_list, val_list
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                batch.push(val_list);
+                if batch.len() >= batch_size {
+                    write_batch_insert(&mut writer, &safe_table, &col_list, &batch)?;
+                    batch.clear();
+                }
+            }
             total_rows += 1;
+        }
+
+        if !batch.is_empty() {
+            write_batch_insert(&mut writer, &safe_table, &col_list, &batch)?;
         }
 
         let percent = ((sheet_idx + 1) as f64 / total_sheets as f64 * 100.0) as u8;
@@ -955,17 +1066,32 @@ pub async fn import_excel_to_sql(
 
 // ─── CSV → SQL (streaming) ─────────────────────────────────────────────────
 
-/// Stream a large CSV file to SQL INSERT statements (O(1) memory per row).
-/// First line = column headers. Empty fields → NULL. Others → single-quoted strings.
+/// Stream a large CSV file to SQL INSERT statements.
+/// - no_header: treat first row as data; column names become col1, col2, …
+/// - batch_size: rows per INSERT (0 = one row per INSERT).
+/// - detect_numeric: two-pass scan — first pass determines which columns are
+///   all-numeric, second pass writes SQL with unquoted numbers.
 #[tauri::command]
 pub async fn import_csv_to_sql(
     app: tauri::AppHandle,
     input_path: String,
     output_path: String,
     table_name: String,
+    no_header: bool,
+    batch_size: usize,
+    detect_numeric: bool,
 ) -> Result<ImportStats, String> {
-    let table_name = table_name.replace('`', "");
+    let safe_table = table_name.replace('`', "");
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+
+    // Pass 1 (optional): determine which columns are all-numeric.
+    let numeric_cols: Vec<bool> = if detect_numeric {
+        detect_numeric_cols(&input_path, no_header)?
+    } else {
+        Vec::new()
+    };
+
+    // Pass 2: stream the file and write SQL.
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
     let reader = BufReader::new(file);
     let out =
@@ -975,44 +1101,60 @@ pub async fn import_csv_to_sql(
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
     let mut row_count = 0usize;
-    let mut headers: Option<Vec<String>> = None;
     let mut col_list = String::new();
+    let mut col_count = 0usize;
+    let mut header_done = false;
+    let mut first_line = true;
+    let mut batch: Vec<String> = Vec::new();
 
     for line_result in reader.lines() {
         let raw = line_result.map_err(|e| e.to_string())?;
         bytes_read += raw.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
 
-        // Strip CRLF and, on the very first content line, a UTF-8 BOM that
-        // Excel commonly prepends (appears as \u{FEFF} in the first field).
         let stripped = raw.trim_end_matches('\r');
-        let line = if headers.is_none() {
+        let line = if first_line {
             stripped.trim_start_matches('\u{FEFF}')
         } else {
             stripped
         };
+        first_line = false;
+
         if line.is_empty() {
             continue;
         }
 
         let fields = parse_csv_line(line);
 
-        if headers.is_none() {
-            col_list = fields
-                .iter()
-                .map(|h| format!("`{}`", h.replace('`', "")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            headers = Some(fields);
-            continue;
+        if !header_done {
+            if no_header {
+                // First data line: generate col1, col2, … and fall through to write it
+                col_count = fields.len();
+                col_list = (1..=col_count)
+                    .map(|i| format!("`col{}`", i))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+            } else {
+                // Header line: build col_list and skip to next line
+                col_count = fields.len();
+                col_list = fields
+                    .iter()
+                    .map(|h| format!("`{}`", h.replace('`', "")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                header_done = true;
+                continue;
+            }
+            header_done = true;
         }
 
-        let hdr_count = headers.as_ref().unwrap().len();
-        let val_list = (0..hdr_count)
+        let val_list = (0..col_count)
             .map(|i| {
                 let v = fields.get(i).map(|s| s.as_str()).unwrap_or("");
                 if v.is_empty() {
                     "NULL".to_string()
+                } else if detect_numeric && numeric_cols.get(i).copied().unwrap_or(false) {
+                    v.to_string()
                 } else {
                     format!("'{}'", v.replace('\'', "''"))
                 }
@@ -1020,13 +1162,25 @@ pub async fn import_csv_to_sql(
             .collect::<Vec<_>>()
             .join(", ");
 
-        writeln!(
-            writer,
-            "INSERT INTO `{}` ({}) VALUES ({});",
-            table_name, col_list, val_list
-        )
-        .map_err(|e| e.to_string())?;
+        if batch_size == 0 {
+            writeln!(
+                writer,
+                "INSERT INTO `{}` ({}) VALUES ({});",
+                safe_table, col_list, val_list
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            batch.push(val_list);
+            if batch.len() >= batch_size {
+                write_batch_insert(&mut writer, &safe_table, &col_list, &batch)?;
+                batch.clear();
+            }
+        }
         row_count += 1;
+    }
+
+    if !batch.is_empty() {
+        write_batch_insert(&mut writer, &safe_table, &col_list, &batch)?;
     }
 
     writer.flush().map_err(|e| e.to_string())?;

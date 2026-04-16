@@ -1,9 +1,15 @@
 use calamine::{open_workbook, Data, Reader, Xlsx};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tauri::Emitter;
+
+/// 1 MB read buffer — reduces kernel round-trips for large files
+const BUF_CAPACITY: usize = 1 << 20;
+/// Lines per parallel chunk — balances parallelism overhead vs throughput
+const CHUNK_SIZE: usize = 50_000;
 
 #[derive(serde::Serialize, Clone)]
 struct ProgressEvent {
@@ -75,7 +81,7 @@ pub async fn segment_file(
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file =
         File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
 
     let mut file_index: u32 = 0;
     let mut chunk_count: u64 = 0;
@@ -295,7 +301,7 @@ pub async fn merge_file(
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file =
         File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
 
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
@@ -440,7 +446,7 @@ pub async fn split_file(
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file =
         File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
 
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
@@ -598,7 +604,7 @@ pub async fn extract_by_tables(
 
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out = File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
     let mut writer = BufWriter::new(out);
 
@@ -670,7 +676,7 @@ pub async fn export_to_csv_file(
 ) -> Result<ExportStats, String> {
     let total_bytes = fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
 
     let mut table_writers: HashMap<String, BufWriter<File>> = HashMap::new();
     let mut table_has_header: std::collections::HashSet<String> =
@@ -918,7 +924,7 @@ fn is_numeric_str(s: &str) -> bool {
 /// Reads the file once without writing any output.
 fn detect_numeric_cols(input_path: &str, no_header: bool) -> Result<Vec<bool>, String> {
     let file = File::open(input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let mut is_numeric: Vec<bool> = Vec::new();
     let mut initialized = false;
     let mut first_line = true;
@@ -1093,7 +1099,7 @@ pub async fn import_csv_to_sql(
 
     // Pass 2: stream the file and write SQL.
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
     let mut writer = BufWriter::new(out);
@@ -1353,7 +1359,7 @@ pub async fn dedupe_sql(
 
     // Pass 1: build map from (table, key_value) → line_number
     let file1 = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader1 = BufReader::new(file1);
+    let reader1 = BufReader::with_capacity(BUF_CAPACITY, file1);
     let mut key_to_line: HashMap<(String, String), usize> = HashMap::new();
     let mut original_count = 0usize;
     let mut bytes_read: u64 = 0;
@@ -1388,7 +1394,7 @@ pub async fn dedupe_sql(
 
     // Pass 2: write kept lines
     let file2 = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader2 = BufReader::new(file2);
+    let reader2 = BufReader::with_capacity(BUF_CAPACITY, file2);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
     let mut writer = BufWriter::new(out_file);
 
@@ -1522,74 +1528,100 @@ pub struct RenameStats {
     pub replaced_count: usize,
 }
 
-fn apply_rename_line(line: &str, rules: &[RenameRuleInput]) -> (String, bool) {
-    let upper = line.to_uppercase();
-    if !upper.contains("INSERT") {
+/// Pre-compiled form of one RenameRuleInput — regex compiled once, reused for all lines.
+struct CompiledRenameRule {
+    rule_type: String,
+    to: String,
+    re: regex::Regex,
+}
+
+fn compile_rename_rules(rules: &[RenameRuleInput]) -> Vec<CompiledRenameRule> {
+    rules
+        .iter()
+        .filter_map(|rule| {
+            if rule.from == rule.to || rule.from.is_empty() {
+                return None;
+            }
+            let escaped = regex::escape(&rule.from);
+            let re_str = match rule.rule_type.as_str() {
+                "table" => format!(
+                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
+                ),
+                "prefix" => format!(
+                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}([^`\s]*)`|(?<![`\w]){escaped}(\S*?)(?![`\w(]))"
+                ),
+                "column" => format!(
+                    r"(?i)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
+                ),
+                _ => return None,
+            };
+            regex::Regex::new(&re_str).ok().map(|re| CompiledRenameRule {
+                rule_type: rule.rule_type.clone(),
+                to: rule.to.clone(),
+                re,
+            })
+        })
+        .collect()
+}
+
+fn apply_compiled_rename(line: &str, rules: &[CompiledRenameRule]) -> (String, bool) {
+    if !line.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
         return (line.to_string(), false);
     }
     let mut result = line.to_string();
     let mut modified = false;
 
     for rule in rules {
-        if rule.from == rule.to || rule.from.is_empty() { continue; }
-        let escaped = regex::escape(&rule.from);
         let new_line = match rule.rule_type.as_str() {
             "table" => {
-                // Replace table name: INSERT INTO `from` or INSERT INTO from
-                let re_str = format!(
-                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
-                );
-                if let Ok(re) = regex::Regex::new(&re_str) {
-                    let to = rule.to.clone();
-                    re.replace(&result, move |caps: &regex::Captures| {
-                        format!("{}`{}`", &caps[1], to)
-                    }).to_string()
-                } else { result.clone() }
+                let to = rule.to.clone();
+                rule.re.replace(&result, move |caps: &regex::Captures| {
+                    format!("{}`{}`", &caps[1], to)
+                }).to_string()
             }
             "prefix" => {
-                let re_str = format!(
-                    r"(?i)(INSERT\s+INTO\s+)(`{escaped}([^`\s]*)`|(?<![`\w]){escaped}(\S*?)(?![`\w(]))"
-                );
-                if let Ok(re) = regex::Regex::new(&re_str) {
-                    let to = rule.to.clone();
-                    re.replace(&result, move |caps: &regex::Captures| {
-                        let pfx = &caps[1];
-                        let rest = caps.get(3).or(caps.get(4)).map_or("", |m| m.as_str());
-                        format!("{}`{}{}`", pfx, to, rest)
-                    }).to_string()
-                } else { result.clone() }
+                let to = rule.to.clone();
+                rule.re.replace(&result, move |caps: &regex::Captures| {
+                    let pfx = &caps[1];
+                    let rest = caps.get(3).or(caps.get(4)).map_or("", |m| m.as_str());
+                    format!("{}`{}{}`", pfx, to, rest)
+                }).to_string()
             }
             "column" => {
-                // Replace only inside the column list section (before VALUES)
                 let upper_res = result.to_uppercase();
                 if let Some(val_pos) = upper_res.find("VALUES") {
                     let before_values = &result[..val_pos];
-                    if let Some(open) = before_values.find('(') {
-                        if let Some(close) = before_values.rfind(')') {
-                            let col_section = &before_values[open + 1..close];
-                            let re_str = format!(
-                                r"(?i)(`{escaped}`|(?<![`\w]){escaped}(?![`\w]))"
-                            );
-                            if let Ok(re) = regex::Regex::new(&re_str) {
-                                let to = rule.to.clone();
-                                let new_cols = re.replace_all(col_section, move |_caps: &regex::Captures| {
-                                    format!("`{}`", to)
-                                }).to_string();
-                                format!(
-                                    "{}{}{}{}",
-                                    &before_values[..open + 1],
-                                    new_cols,
-                                    &before_values[close..],
-                                    &result[val_pos..]
-                                )
-                            } else { result.clone() }
-                        } else { result.clone() }
-                    } else { result.clone() }
-                } else { result.clone() }
+                    if let (Some(open), Some(close)) =
+                        (before_values.find('('), before_values.rfind(')'))
+                    {
+                        let col_section = &before_values[open + 1..close];
+                        let to = rule.to.clone();
+                        let new_cols = rule
+                            .re
+                            .replace_all(col_section, move |_: &regex::Captures| {
+                                format!("`{}`", to)
+                            })
+                            .to_string();
+                        format!(
+                            "{}{}{}{}",
+                            &before_values[..open + 1],
+                            new_cols,
+                            &before_values[close..],
+                            &result[val_pos..]
+                        )
+                    } else {
+                        result.clone()
+                    }
+                } else {
+                    result.clone()
+                }
             }
             _ => result.clone(),
         };
-        if new_line != result { modified = true; result = new_line; }
+        if new_line != result {
+            modified = true;
+            result = new_line;
+        }
     }
     (result, modified)
 }
@@ -1601,24 +1633,52 @@ pub async fn rename_sql(
     output_path: String,
     rules: Vec<RenameRuleInput>,
 ) -> Result<RenameStats, String> {
+    // Compile all regexes ONCE before processing any line
+    let compiled = std::sync::Arc::new(compile_rename_rules(&rules));
+
     let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
     let mut writer = BufWriter::new(out_file);
 
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
     let mut replaced_count = 0usize;
+    let mut chunk: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
 
     for line_res in reader.lines() {
         let line = line_res.map_err(|e| e.to_string())?;
         bytes_read += line.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
-        let (new_line, modified) = apply_rename_line(line.trim_end(), &rules);
-        if modified { replaced_count += 1; }
-        writeln!(writer, "{}", new_line).map_err(|e| e.to_string())?;
+        chunk.push(line);
+
+        if chunk.len() >= CHUNK_SIZE {
+            let rules_ref = compiled.clone();
+            let results: Vec<(String, bool)> = chunk
+                .par_iter()
+                .map(|l| apply_compiled_rename(l.trim_end(), &rules_ref))
+                .collect();
+            for (out_line, modified) in &results {
+                if *modified { replaced_count += 1; }
+                writeln!(writer, "{}", out_line).map_err(|e| e.to_string())?;
+            }
+            chunk.clear();
+        }
     }
+    // Remaining lines
+    if !chunk.is_empty() {
+        let rules_ref = compiled.clone();
+        let results: Vec<(String, bool)> = chunk
+            .par_iter()
+            .map(|l| apply_compiled_rename(l.trim_end(), &rules_ref))
+            .collect();
+        for (out_line, modified) in &results {
+            if *modified { replaced_count += 1; }
+            writeln!(writer, "{}", out_line).map_err(|e| e.to_string())?;
+        }
+    }
+
     writer.flush().map_err(|e| e.to_string())?;
     Ok(RenameStats { replaced_count })
 }
@@ -1648,67 +1708,90 @@ pub async fn offset_sql(
 ) -> Result<OffsetStats, String> {
     let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
     let mut writer = BufWriter::new(out_file);
 
+    let rules_arc = std::sync::Arc::new(rules);
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
     let mut modified_count = 0usize;
     let mut skipped_count = 0usize;
     let mut warning_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut chunk: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
+
+    // Returns (output_line, modified, skipped, warnings)
+    let process_offset_chunk = |chunk: &[String], rules: &[OffsetRuleInput]| -> Vec<(String, bool, bool, Vec<String>)> {
+        chunk.par_iter().map(|l| {
+            let trimmed = l.trim_end();
+            if let Some((table, columns, mut values)) = parse_insert_parts(trimmed) {
+                let mut line_modified = false;
+                let mut line_skipped = false;
+                let mut local_warn: Vec<String> = vec![];
+                for rule in rules {
+                    let idx = if !rule.column.is_empty() {
+                        if let Some(cols) = &columns {
+                            cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase())
+                        } else { rule.col_index.map(|i| i - 1) }
+                    } else { rule.col_index.map(|i| i - 1) };
+                    if let Some(i) = idx {
+                        if i >= values.len() { continue; }
+                        let raw = &values[i];
+                        if raw.starts_with('\'') {
+                            line_skipped = true;
+                            local_warn.push(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
+                            continue;
+                        }
+                        if let Ok(n) = raw.parse::<i64>() {
+                            values[i] = (n + rule.offset).to_string();
+                            line_modified = true;
+                        } else if let Ok(f) = raw.parse::<f64>() {
+                            values[i] = format!("{}", f + rule.offset as f64);
+                            line_modified = true;
+                        } else {
+                            line_skipped = true;
+                            local_warn.push(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
+                        }
+                    }
+                }
+                let out = if line_modified {
+                    let col_part = if let Some(cols) = &columns {
+                        format!(" ({})", cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "))
+                    } else { String::new() };
+                    format!("INSERT INTO `{}`{} VALUES ({});", table, col_part, values.join(", "))
+                } else {
+                    trimmed.to_string()
+                };
+                (out, line_modified, line_skipped, local_warn)
+            } else {
+                (trimmed.to_string(), false, false, vec![])
+            }
+        }).collect()
+    };
 
     for line_res in reader.lines() {
         let line = line_res.map_err(|e| e.to_string())?;
         bytes_read += line.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
-        let trimmed = line.trim_end();
-
-        if let Some((table, columns, mut values)) = parse_insert_parts(trimmed) {
-            let mut line_modified = false;
-            let mut line_skipped = false;
-
-            for rule in &rules {
-                let idx = if !rule.column.is_empty() {
-                    if let Some(cols) = &columns {
-                        cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase())
-                    } else { rule.col_index.map(|i| i - 1) }
-                } else { rule.col_index.map(|i| i - 1) };
-
-                if let Some(i) = idx {
-                    if i >= values.len() { continue; }
-                    let raw = &values[i];
-                    if raw.starts_with('\'') {
-                        line_skipped = true;
-                        warning_set.insert(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
-                        continue;
-                    }
-                    if let Ok(n) = raw.parse::<i64>() {
-                        values[i] = (n + rule.offset).to_string();
-                        line_modified = true;
-                    } else if let Ok(f) = raw.parse::<f64>() {
-                        values[i] = format!("{}", f + rule.offset as f64);
-                        line_modified = true;
-                    } else {
-                        line_skipped = true;
-                        warning_set.insert(format!("列 \"{}\" 存在非数值，已跳过偏移", rule.column));
-                    }
-                }
+        chunk.push(line);
+        if chunk.len() >= CHUNK_SIZE {
+            let results = process_offset_chunk(&chunk, &rules_arc);
+            for (out, modified, skipped, warns) in results {
+                writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+                if modified { modified_count += 1; }
+                if skipped { skipped_count += 1; }
+                for w in warns { warning_set.insert(w); }
             }
-
-            if line_skipped { skipped_count += 1; }
-            if line_modified {
-                modified_count += 1;
-                let col_part = if let Some(cols) = &columns {
-                    format!(" ({})", cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "))
-                } else { String::new() };
-                writeln!(writer, "INSERT INTO `{}`{} VALUES ({});", table, col_part, values.join(", "))
-                    .map_err(|e| e.to_string())?;
-            } else {
-                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-            }
-        } else {
-            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        let results = process_offset_chunk(&chunk, &rules_arc);
+        for (out, modified, skipped, warns) in results {
+            writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+            if modified { modified_count += 1; }
+            if skipped { skipped_count += 1; }
+            for w in warns { warning_set.insert(w); }
         }
     }
 
@@ -1738,6 +1821,53 @@ pub struct SqlFileStats {
     pub duration_ms: u64,
 }
 
+/// Merge a chunk of (line, byte_len) into a table_map using rayon parallel fold.
+/// Each rayon thread builds a local HashMap, then they are merged — no locking needed.
+fn merge_stats_chunk(
+    target: &mut HashMap<String, (usize, usize)>,
+    chunk: &[(String, usize)],
+    re: &regex::Regex,
+) {
+    let partial: HashMap<String, (usize, usize)> = chunk
+        .par_iter()
+        .filter_map(|(line, len)| {
+            let trimmed = line.trim_end();
+            // fast ascii check before regex
+            if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
+                return None;
+            }
+            re.captures(trimmed)
+                .and_then(|c| c.get(1))
+                .map(|m| (m.as_str().to_string(), *len))
+        })
+        .fold(
+            || HashMap::<String, (usize, usize)>::new(),
+            |mut m, (name, len)| {
+                let e = m.entry(name).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += len;
+                m
+            },
+        )
+        .reduce(
+            || HashMap::<String, (usize, usize)>::new(),
+            |mut a, b| {
+                for (k, v) in b {
+                    let e = a.entry(k).or_insert((0, 0));
+                    e.0 += v.0;
+                    e.1 += v.1;
+                }
+                a
+            },
+        );
+
+    for (k, v) in partial {
+        let e = target.entry(k).or_insert((0, 0));
+        e.0 += v.0;
+        e.1 += v.1;
+    }
+}
+
 #[tauri::command]
 pub async fn analyze_sql_file(
     app: tauri::AppHandle,
@@ -1746,32 +1876,32 @@ pub async fn analyze_sql_file(
     let start = std::time::Instant::now();
     let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
+
+    // Compile regex ONCE — not once per line
+    let insert_re = regex::Regex::new(r"(?i)INSERT\s+INTO\s+`?([^`\s(]+)`?")
+        .map_err(|e| e.to_string())?;
 
     let mut table_map: HashMap<String, (usize, usize)> = HashMap::new();
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
+    // (line_content, byte_len) buffer for parallel chunk processing
+    let mut chunk: Vec<(String, usize)> = Vec::with_capacity(CHUNK_SIZE);
 
     for line_res in reader.lines() {
         let line = line_res.map_err(|e| e.to_string())?;
         let line_len = line.len() + 1;
         bytes_read += line_len as u64;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
-        let trimmed = line.trim_end();
-        let upper = trimmed.to_uppercase();
-        if !upper.contains("INSERT") { continue; }
+        chunk.push((line, line_len));
 
-        // Fast table name extraction
-        if let Some(m) = {
-            let re = regex::Regex::new(r"(?i)INSERT\s+INTO\s+`?([^`\s(]+)`?").ok();
-            re.and_then(|r| r.captures(trimmed))
-        } {
-            if let Some(tname) = m.get(1) {
-                let entry = table_map.entry(tname.as_str().to_string()).or_insert((0, 0));
-                entry.0 += 1;
-                entry.1 += line_len;
-            }
+        if chunk.len() >= CHUNK_SIZE {
+            merge_stats_chunk(&mut table_map, &chunk, &insert_re);
+            chunk.clear();
         }
+    }
+    if !chunk.is_empty() {
+        merge_stats_chunk(&mut table_map, &chunk, &insert_re);
     }
 
     let total_statements: usize = table_map.values().map(|(c, _)| c).sum();
@@ -1812,83 +1942,98 @@ pub async fn convert_statements(
 ) -> Result<ConvertStmtStats, String> {
     let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
     let mut writer = BufWriter::new(out_file);
+
+    let exclude_set = std::sync::Arc::new(
+        exclude_columns.iter().map(|c| c.to_lowercase()).collect::<std::collections::HashSet<String>>()
+    );
+    let mode = std::sync::Arc::new(mode);
+    let pk_column = std::sync::Arc::new(pk_column);
 
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
     let mut converted_count = 0usize;
     let mut skipped_count = 0usize;
-    let exclude_set: std::collections::HashSet<String> =
-        exclude_columns.iter().map(|c| c.to_lowercase()).collect();
+    let mut chunk: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
+
+    // Returns (output_line, converted, skipped)
+    let process_convert_chunk = |chunk: &[String],
+                                  mode: &str,
+                                  pk_col_name: &str,
+                                  excl: &std::collections::HashSet<String>|
+     -> Vec<(String, bool, bool)> {
+        chunk.par_iter().map(|l| {
+            let trimmed = l.trim_end();
+            if !trimmed.to_uppercase().contains("INSERT") {
+                return (trimmed.to_string(), false, false);
+            }
+            if let Some((table, Some(cols), values)) = parse_insert_parts(trimmed) {
+                let pk_idx = match cols.iter().position(|c| c.to_lowercase() == pk_col_name.to_lowercase()) {
+                    Some(i) => i,
+                    None => return (trimmed.to_string(), false, true),
+                };
+                let pk_val = values.get(pk_idx).map(|s| s.as_str()).unwrap_or("NULL");
+                let pk_col = &cols[pk_idx];
+                let converted = match mode {
+                    "update" => {
+                        let set_parts: Vec<String> = cols.iter().enumerate()
+                            .filter(|(i, c)| *i != pk_idx && !excl.contains(&c.to_lowercase()))
+                            .map(|(i, c)| format!("`{}` = {}", c, values.get(i).map(|s| s.as_str()).unwrap_or("NULL")))
+                            .collect();
+                        if set_parts.is_empty() { return (trimmed.to_string(), false, true); }
+                        format!("UPDATE `{}` SET {} WHERE `{}` = {};", table, set_parts.join(", "), pk_col, pk_val)
+                    }
+                    "mysql_upsert" => {
+                        let col_list = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+                        let val_list = values.join(", ");
+                        let update_parts: Vec<String> = cols.iter().enumerate()
+                            .filter(|(i, c)| *i != pk_idx && !excl.contains(&c.to_lowercase()))
+                            .map(|(_, c)| format!("`{}` = VALUES(`{}`)", c, c))
+                            .collect();
+                        format!("INSERT INTO `{}` ({}) VALUES ({}) ON DUPLICATE KEY UPDATE {};",
+                            table, col_list, val_list, update_parts.join(", "))
+                    }
+                    _ => { // pg_upsert
+                        let col_list = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ");
+                        let val_list = values.join(", ");
+                        let update_parts: Vec<String> = cols.iter().enumerate()
+                            .filter(|(i, c)| *i != pk_idx && !excl.contains(&c.to_lowercase()))
+                            .map(|(_, c)| format!("\"{}\" = EXCLUDED.\"{}\"", c, c))
+                            .collect();
+                        format!("INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT (\"{}\") DO UPDATE SET {};",
+                            table, col_list, val_list, pk_col, update_parts.join(", "))
+                    }
+                };
+                (converted, true, false)
+            } else {
+                (trimmed.to_string(), false, true)
+            }
+        }).collect()
+    };
 
     for line_res in reader.lines() {
         let line = line_res.map_err(|e| e.to_string())?;
         bytes_read += line.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
-        let trimmed = line.trim_end();
-        let upper = trimmed.to_uppercase();
-
-        if !upper.contains("INSERT") {
-            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-            continue;
+        chunk.push(line);
+        if chunk.len() >= CHUNK_SIZE {
+            let results = process_convert_chunk(&chunk, &mode, &pk_column, &exclude_set);
+            for (out, conv, skip) in results {
+                writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+                if conv { converted_count += 1; }
+                if skip { skipped_count += 1; }
+            }
+            chunk.clear();
         }
-
-        if let Some((table, Some(cols), values)) = parse_insert_parts(trimmed) {
-            let pk_idx = cols.iter().position(|c| c.to_lowercase() == pk_column.to_lowercase());
-            let pk_idx = match pk_idx {
-                Some(i) => i,
-                None => {
-                    skipped_count += 1;
-                    writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-                    continue;
-                }
-            };
-
-            let pk_val = values.get(pk_idx).map(|s| s.as_str()).unwrap_or("NULL");
-            let pk_col = &cols[pk_idx];
-
-            let converted = match mode.as_str() {
-                "update" => {
-                    let set_parts: Vec<String> = cols.iter().enumerate()
-                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
-                        .map(|(i, c)| format!("`{}` = {}", c, values.get(i).map(|s| s.as_str()).unwrap_or("NULL")))
-                        .collect();
-                    if set_parts.is_empty() {
-                        skipped_count += 1;
-                        writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-                        continue;
-                    }
-                    format!("UPDATE `{}` SET {} WHERE `{}` = {};", table, set_parts.join(", "), pk_col, pk_val)
-                }
-                "mysql_upsert" => {
-                    let col_list = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
-                    let val_list = values.join(", ");
-                    let update_parts: Vec<String> = cols.iter().enumerate()
-                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
-                        .map(|(_, c)| format!("`{}` = VALUES(`{}`)", c, c))
-                        .collect();
-                    format!("INSERT INTO `{}` ({}) VALUES ({}) ON DUPLICATE KEY UPDATE {};",
-                        table, col_list, val_list, update_parts.join(", "))
-                }
-                "pg_upsert" | _ => {
-                    let col_list = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ");
-                    let val_list = values.join(", ");
-                    let update_parts: Vec<String> = cols.iter().enumerate()
-                        .filter(|(i, c)| *i != pk_idx && !exclude_set.contains(&c.to_lowercase()))
-                        .map(|(_, c)| format!("\"{}\" = EXCLUDED.\"{}\"", c, c))
-                        .collect();
-                    format!("INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT (\"{}\") DO UPDATE SET {};",
-                        table, col_list, val_list, pk_col, update_parts.join(", "))
-                }
-            };
-
-            converted_count += 1;
-            writeln!(writer, "{}", converted).map_err(|e| e.to_string())?;
-        } else {
-            skipped_count += 1;
-            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+    }
+    if !chunk.is_empty() {
+        let results = process_convert_chunk(&chunk, &mode, &pk_column, &exclude_set);
+        for (out, conv, skip) in results {
+            writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+            if conv { converted_count += 1; }
+            if skip { skipped_count += 1; }
         }
     }
 
@@ -1937,7 +2082,7 @@ pub async fn merge_sql_files(
         }
 
         let file = File::open(input_path).map_err(|e| e.to_string())?;
-        let reader = BufReader::new(file);
+        let reader = BufReader::with_capacity(BUF_CAPACITY, file);
 
         for line_res in reader.lines() {
             let line = line_res.map_err(|e| e.to_string())?;
@@ -2031,44 +2176,59 @@ fn fake_name(seed: &str) -> String {
     format!("{}{}", surnames[h % surnames.len()], givens[(h >> 4) % givens.len()])
 }
 
-fn apply_mask(original: &str, rule: &MaskRuleInput, cache: &mut HashMap<String, String>) -> String {
+struct CompiledMaskRule {
+    column: String,
+    mask_type: String,
+    custom_value: Option<String>,
+    regex_re: Option<regex::Regex>,
+    regex_replace: Option<String>,
+}
+
+fn compile_mask_rules(rules: &[MaskRuleInput]) -> Vec<CompiledMaskRule> {
+    rules.iter().map(|r| {
+        let regex_re = if r.mask_type == "regex_replace" {
+            r.regex_pattern.as_deref().and_then(|p| regex::Regex::new(p).ok())
+        } else { None };
+        CompiledMaskRule {
+            column: r.column.clone(),
+            mask_type: r.mask_type.clone(),
+            custom_value: r.custom_value.clone(),
+            regex_re,
+            regex_replace: r.regex_replace.clone(),
+        }
+    }).collect()
+}
+
+/// Deterministic mask using pre-compiled regex — no cache needed (hash functions are pure).
+fn apply_compiled_mask(original: &str, rule: &CompiledMaskRule) -> String {
     let is_quoted = original.starts_with('\'') && original.ends_with('\'');
     let inner = if is_quoted {
         original[1..original.len() - 1].replace("''", "'")
     } else {
         original.to_string()
     };
-
-    let cache_key = format!("{}:{}:{}", rule.column, rule.mask_type, inner);
-    let fake_inner = if let Some(cached) = cache.get(&cache_key) {
-        cached.clone()
-    } else {
-        let fake = match rule.mask_type.as_str() {
-            "phone" => fake_phone(&cache_key),
-            "email" => fake_email(&cache_key),
-            "id_card" => fake_id_card(&cache_key),
-            "name" => fake_name(&cache_key),
-            "custom_mask" => rule.custom_value.clone().unwrap_or_else(|| "***".to_string()),
-            "regex_replace" => {
-                if let Some(pattern) = &rule.regex_pattern {
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        let repl = rule.regex_replace.as_deref().unwrap_or("***");
-                        re.replace_all(&inner, repl).to_string()
-                    } else { inner.clone() }
-                } else { inner.clone() }
-            }
-            _ => inner.clone(),
-        };
-        cache.insert(cache_key, fake.clone());
-        fake
+    let seed = format!("{}:{}:{}", rule.column, rule.mask_type, inner);
+    let fake_inner = match rule.mask_type.as_str() {
+        "phone" => fake_phone(&seed),
+        "email" => fake_email(&seed),
+        "id_card" => fake_id_card(&seed),
+        "name" => fake_name(&seed),
+        "custom_mask" => rule.custom_value.clone().unwrap_or_else(|| "***".to_string()),
+        "regex_replace" => {
+            if let Some(re) = &rule.regex_re {
+                let repl = rule.regex_replace.as_deref().unwrap_or("***");
+                re.replace_all(&inner, repl).to_string()
+            } else { inner.clone() }
+        }
+        _ => inner.clone(),
     };
-
     if is_quoted {
         format!("'{}'", fake_inner.replace('\'', "''"))
     } else {
         fake_inner
     }
 }
+
 
 #[tauri::command]
 pub async fn mask_sql(
@@ -2079,58 +2239,74 @@ pub async fn mask_sql(
 ) -> Result<MaskStats, String> {
     let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
     let mut writer = BufWriter::new(out_file);
 
+    let compiled = std::sync::Arc::new(compile_mask_rules(&rules));
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
     let mut masked_count = 0usize;
     let mut warning_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut cache: HashMap<String, String> = HashMap::new();
+    let mut chunk: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
+
+    // Returns (output_line, was_masked, warnings)
+    let process_mask_chunk = |chunk: &[String], rules: &[CompiledMaskRule]| -> Vec<(String, bool, Vec<String>)> {
+        chunk.par_iter().map(|l| {
+            let trimmed = l.trim_end();
+            if !trimmed.to_uppercase().contains("INSERT") {
+                return (trimmed.to_string(), false, vec![]);
+            }
+            if let Some((table, Some(cols), mut values)) = parse_insert_parts(trimmed) {
+                let mut line_modified = false;
+                let mut local_warn: Vec<String> = vec![];
+                for rule in rules {
+                    match cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase()) {
+                        None => local_warn.push(format!("列 \"{}\" 不存在，已跳过", rule.column)),
+                        Some(i) => {
+                            let original = values[i].clone();
+                            let masked = apply_compiled_mask(&original, rule);
+                            if masked != original {
+                                values[i] = masked;
+                                line_modified = true;
+                            }
+                        }
+                    }
+                }
+                let out = if line_modified {
+                    let col_part = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+                    format!("INSERT INTO `{}` ({}) VALUES ({});", table, col_part, values.join(", "))
+                } else {
+                    trimmed.to_string()
+                };
+                (out, line_modified, local_warn)
+            } else {
+                (trimmed.to_string(), false, vec![])
+            }
+        }).collect()
+    };
 
     for line_res in reader.lines() {
         let line = line_res.map_err(|e| e.to_string())?;
         bytes_read += line.len() as u64 + 1;
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
-        let trimmed = line.trim_end();
-        let upper = trimmed.to_uppercase();
-
-        if !upper.contains("INSERT") {
-            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-            continue;
+        chunk.push(line);
+        if chunk.len() >= CHUNK_SIZE {
+            let results = process_mask_chunk(&chunk, &compiled);
+            for (out, masked, warns) in results {
+                writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+                if masked { masked_count += 1; }
+                for w in warns { warning_set.insert(w); }
+            }
+            chunk.clear();
         }
-
-        if let Some((table, Some(cols), mut values)) = parse_insert_parts(trimmed) {
-            let mut line_modified = false;
-            for rule in &rules {
-                let idx = cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase());
-                match idx {
-                    None => {
-                        warning_set.insert(format!("列 \"{}\" 不存在，已跳过", rule.column));
-                    }
-                    Some(i) => {
-                        let original = values[i].clone();
-                        let masked = apply_mask(&original, rule, &mut cache);
-                        if masked != original {
-                            values[i] = masked;
-                            line_modified = true;
-                        }
-                    }
-                }
-            }
-
-            if line_modified {
-                masked_count += 1;
-                let col_part = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
-                writeln!(writer, "INSERT INTO `{}` ({}) VALUES ({});",
-                    table, col_part, values.join(", "))
-                    .map_err(|e| e.to_string())?;
-            } else {
-                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-            }
-        } else {
-            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+    }
+    if !chunk.is_empty() {
+        let results = process_mask_chunk(&chunk, &compiled);
+        for (out, masked, warns) in results {
+            writeln!(writer, "{}", out).map_err(|e| e.to_string())?;
+            if masked { masked_count += 1; }
+            for w in warns { warning_set.insert(w); }
         }
     }
 

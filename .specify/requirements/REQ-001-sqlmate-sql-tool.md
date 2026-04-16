@@ -1,6 +1,6 @@
 # REQ-001: SQLMate — 跨平台 SQL 处理桌面工具
 
-> 创建时间: 2026-04-14 | 状态: 进行中 | 阶段: 设计
+> 创建时间: 2026-04-14 | 状态: 已完成 | 阶段: 已发布
 
 ## 需求背景
 
@@ -19,9 +19,12 @@
 - **拆分逻辑**：识别 VALUES 后的多组括号，逐一拆出为独立 INSERT 语句
 - **分割模式**：按条数（每文件 X 条）和按大小（每文件不超过 X MB）二选一，均可配置
 - **输入方式**：支持直接粘贴文本 或 拖拽/点击选择文件，两者等价
-- **输出方式**：
+- **大文件阈值**：超过 10MB 的文件自动进入大文件模式，内容不加载到内存，仅记录路径
+- **大文件输出**：合并 / 拆分 / 分割大文件模式下，强制弹出保存对话框，输出直接写磁盘，无复制操作（几 GB 数据复制无意义）
+- **小文件输出**：
   - 合并 / 拆分 / 格式化：结果可复制到剪贴板，也可保存为单个文件
   - 分割：结果强制保存到用户指定文件夹（因为是多文件输出）
+- **格式化限制**：格式化功能拒绝大文件（>10MB），提示不支持
 - **格式化方言**：用户通过下拉框选择目标方言，默认 MySQL
 - **主题**：深色/浅色双模式，跟随系统，也可手动切换
 
@@ -33,8 +36,11 @@
 | 前端框架 | React 19 + TypeScript | 团队熟悉 JS/TS，生态丰富 |
 | UI 组件库 | shadcn/ui + Tailwind CSS | 高质感可定制，不额外增加体积 |
 | SQL 格式化库 | sql-formatter | 纯 JS，支持多方言，无需服务端 |
-| SQL 处理层 | TypeScript 前端层 | 合并/拆分/格式化均为字符串处理，无需 Rust |
+| SQL 处理层（小文件） | TypeScript 前端层 | ≤10MB 时字符串处理足够，无需 Rust |
+| SQL 处理层（大文件） | Rust 流式（BufReader/BufWriter） | 内存 O(1条语句)，支持无上限文件大小；JS 在浏览器环境无法高效流式处理 |
 | 文件 I/O | Tauri FS API（Rust） | 读大文件、写多文件、选文件夹对话框 |
+| 进度上报 | Tauri 事件（stream-progress） | 每完成 1% 触发一次，最多 100 次 IPC，避免刷爆前端消息队列 |
+| merge_file 内存策略 | 攒够 batch_size 立即写盘 | 内存上限 = 表数 × batch_size，与文件总大小无关 |
 | 布局 | 左侧图标导航 | 类 VS Code 风格，功能切换直观，内容区宽裕 |
 | 交互模式 | 步骤流式（① 输入 → ② 配置 → ③ 结果） | 引导感强，参数配置清晰 |
 | 主题色 | 紫蓝渐变（#7c8cf8 → #a78bfa） | 科技感，开发工具气质 |
@@ -46,17 +52,19 @@
 
 ### 前端层（src/）
 - `src/App.tsx` — 根组件，路由/主题切换入口
-- `src/pages/Merge.tsx` — SQL 合并功能页
-- `src/pages/Split.tsx` — SQL 拆分功能页
-- `src/pages/Segment.tsx` — SQL 分割功能页
-- `src/pages/Format.tsx` — SQL 格式化功能页
-- `src/lib/sql/merge.ts` — 合并逻辑
-- `src/lib/sql/split.ts` — 拆分逻辑
-- `src/lib/sql/segment.ts` — 分割逻辑
+- `src/pages/Merge.tsx` — SQL 合并功能页（小文件 JS / 大文件 Rust）
+- `src/pages/Split.tsx` — SQL 拆分功能页（小文件 JS / 大文件 Rust）
+- `src/pages/Segment.tsx` — SQL 分割功能页（始终 Rust）
+- `src/pages/Format.tsx` — SQL 格式化功能页（拒绝大文件）
+- `src/lib/sql/merge.ts` — 小文件合并逻辑（JS）
+- `src/lib/sql/split.ts` — 小文件拆分逻辑（JS）
+- `src/lib/sql/segment.ts` — 小文件分割逻辑（JS）
+- `src/components/SqlEditor.tsx` — 输入区，含大文件检测（>10MB 不加载内容）
+- `src/components/ProgressBar.tsx` — 流式处理进度条组件
+- `src/hooks/useStreamProgress.ts` — 监听 stream-progress Tauri 事件
 
 ### Tauri 层（src-tauri/）
-- `src-tauri/src/main.rs` — Tauri 入口，注册命令
-- `src-tauri/src/commands/file.rs` — 文件读写、文件夹选择命令
+- `src-tauri/src/commands/file.rs` — 所有 Rust 命令：segment_file / merge_file / split_file / read_file / write_file 等
 
 ## 变更记录
 
@@ -65,10 +73,26 @@
 - **变更摘要**: 完成技术选型（Tauri）、UI 风格（双模式紫蓝渐变）、布局（左侧导航+步骤流式）、4 大功能边界定义
 - **提交**: 尚未开始编码
 
+### v1.1 — 2026-04-14 — 功能实现 + 大文件流式 + 发布
+- **变更摘要**: 完成全部功能编码，引入大文件流式处理架构，修复多个关键 bug，打包 Windows 安装包
+- **关键修复**:
+  - `src/main.tsx` 缺少 `import "./index.css"` 导致 UI 完全无样式
+  - `split_file` 正则 raw string 末尾 `\<换行>` 被解释为"匹配换行符"，导致所有语句解析失败输出 0 条
+  - 结果面板被内容撑开横向滚动：改用 `break-all` + `overflow-x-hidden`
+- **新增功能**:
+  - 大文件模式（>10MB）：`LargeFileInfo` 仅存路径，内容不过 IPC
+  - Rust 流式命令：`segment_file`、`split_file`（纯流式 O(1条语句)）、`merge_file`（内存上限 O(表数×batch_size)）
+  - 实时进度条：Rust 每 1% 发一次 `stream-progress` 事件，前端 `useStreamProgress` hook 监听
+  - 大文件合并/拆分强制弹出保存对话框，不提供复制
+- **新增设计决策**: 大文件走 Rust 流式，小文件走 JS；merge_file 攒满 batch_size 立即写盘
+- **产物**: `SQLMate_0.1.0_x64_en-US.msi` + `SQLMate_0.1.0_x64-setup.exe`
+
 ## 遗留问题 / 后续优化
 
+- [x] 大文件处理性能边界：超过 10MB 进入流式模式
+- [x] 分割功能的输出文件命名规则：`output_001.sql`, `output_002.sql`, ...
 - [ ] 确认 SQL 合并是否只针对 INSERT INTO，还是也支持其他语句类型
-- [ ] 大文件处理性能边界：文件多大时需要流式读取而非一次性加载
-- [ ] 分割功能的输出文件命名规则（如 output_001.sql, output_002.sql）
 - [ ] 是否需要操作历史记录功能
 - [ ] 应用图标设计
+- [ ] Node.js 版本警告（当前 20.17，Vite 要求 20.19+ 或 22.12+），需升级
+- [ ] JS bundle 超过 500KB 警告，可按路由做 dynamic import 懒加载拆包

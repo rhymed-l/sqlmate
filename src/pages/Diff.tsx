@@ -4,7 +4,8 @@ import { SqlEditor } from "@/components/SqlEditor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2 } from "lucide-react";
-import { diffSql, type DiffRow, type DiffStatus } from "@/lib/sql/diff";
+import { type DiffRow, type DiffStatus, type DiffResult } from "@/lib/sql/diff";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { cn } from "@/lib/utils";
 
 const STATUS_STYLE: Record<DiffStatus, string> = {
@@ -79,6 +80,7 @@ export function Diff() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const { call } = useSqlWorker();
 
   const canExecute =
     !!leftSql.trim() &&
@@ -91,14 +93,13 @@ export function Diff() {
     setRows(null);
     setSummary(null);
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const result = diffSql(
+      const result = await call<DiffResult>("diff", {
         leftSql,
         rightSql,
-        useColumnName ? keyColumn.trim() : undefined,
-        useColumnName ? undefined : parseInt(keyColIndex, 10)
-      );
+        keyColumn: useColumnName ? keyColumn.trim() : undefined,
+        keyColIndex: useColumnName ? undefined : parseInt(keyColIndex, 10),
+      });
       setRows(result.rows);
       setSummary({
         added: result.addedCount,

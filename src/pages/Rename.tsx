@@ -7,7 +7,8 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CheckCircle, Loader2, Plus, Trash2 } from "lucide-react";
-import { renameSql, type RenameRule, type RuleType } from "@/lib/sql/rename";
+import { type RenameRule, type RuleType, type RenameResult } from "@/lib/sql/rename";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
 import { ProgressBar } from "@/components/ProgressBar";
 
@@ -34,6 +35,7 @@ export function Rename() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
   const canExecute =
     hasInput &&
@@ -95,9 +97,8 @@ export function Rename() {
     }
 
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, replacedCount } = renameSql(input, validRules);
+      const { sql, replacedCount } = await call<RenameResult>("rename", { sql: input, rules: validRules });
       setResult({
         sql,
         meta: `已替换 ${replacedCount} 条 INSERT 语句`,

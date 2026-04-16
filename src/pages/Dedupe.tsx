@@ -7,7 +7,8 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CheckCircle, Loader2 } from "lucide-react";
-import { dedupeSql } from "@/lib/sql/dedupe";
+import type { DedupeResult } from "@/lib/sql/dedupe";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
 import { ProgressBar } from "@/components/ProgressBar";
 
@@ -34,6 +35,7 @@ export function Dedupe() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
 
   const canExecute =
@@ -84,12 +86,10 @@ export function Dedupe() {
 
     // Small file
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const deduped = dedupeSql(input, {
-        keyColumn: colName,
-        keyColIndex: colIndex,
-        keepLast,
+      const deduped = await call<DedupeResult>("dedupe", {
+        sql: input,
+        options: { keyColumn: colName, keyColIndex: colIndex, keepLast },
       });
       setResult({
         sql: deduped.sql,

@@ -7,7 +7,8 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CheckCircle, Loader2, Plus, Trash2 } from "lucide-react";
-import { maskSql, type MaskRule, type MaskType } from "@/lib/sql/mask";
+import { type MaskRule, type MaskType, type MaskResult } from "@/lib/sql/mask";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
 import { ProgressBar } from "@/components/ProgressBar";
 
@@ -40,6 +41,7 @@ export function Mask() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
   const validRules = rules.filter((r) => r.column.trim() !== "");
   const canExecute = hasInput && !processing && validRules.length > 0;
@@ -101,9 +103,8 @@ export function Mask() {
     }
 
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, maskedCount, warnings: w } = maskSql(input, validRules);
+      const { sql, maskedCount, warnings: w } = await call<MaskResult>("mask", { sql: input, rules: validRules });
       setResult({
         sql,
         meta: `已脱敏 ${maskedCount} 条语句`,

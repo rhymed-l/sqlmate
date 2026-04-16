@@ -96,7 +96,7 @@ pub async fn segment_file(
         let path = Path::new(&output_folder).join(&name);
         let f = File::create(&path)
             .map_err(|e| format!("创建输出文件失败: {}", e))?;
-        Ok(BufWriter::new(f))
+        Ok(BufWriter::with_capacity(BUF_CAPACITY,f))
     };
 
     for line_result in reader.lines() {
@@ -305,7 +305,7 @@ pub async fn merge_file(
 
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
-    let mut writer = BufWriter::new(out);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out);
 
     // key → (table_expr, columns, buffered_tuples)
     let mut order: Vec<String> = Vec::new();
@@ -450,7 +450,7 @@ pub async fn split_file(
 
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
-    let mut writer = BufWriter::new(out);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out);
     let mut statement_count = 0;
     let mut stmt_buf = String::new();
     let mut bytes_read: u64 = 0;
@@ -606,7 +606,7 @@ pub async fn extract_by_tables(
     let file = File::open(&input_path).map_err(|e| format!("无法打开文件: {}", e))?;
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out = File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
-    let mut writer = BufWriter::new(out);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out);
 
     let mut stmt_buf = String::new();
     let mut bytes_read: u64 = 0;
@@ -703,7 +703,7 @@ pub async fn export_to_csv_file(
             let csv_path = Path::new(output_folder).join(format!("{}.csv", tname));
             let f = File::create(&csv_path)
                 .map_err(|e| format!("创建 {}.csv 失败: {}", tname, e))?;
-            table_writers.insert(tname.clone(), BufWriter::new(f));
+            table_writers.insert(tname.clone(), BufWriter::with_capacity(BUF_CAPACITY,f));
         }
 
         let writer = table_writers.get_mut(&tname).unwrap();
@@ -985,7 +985,7 @@ pub async fn import_excel_to_sql(
         open_workbook(&input_path).map_err(|e| format!("无法打开 Excel 文件: {}", e))?;
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
-    let mut writer = BufWriter::new(out);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out);
     let mut total_rows = 0usize;
     let total_sheets = sheet_table_maps.len();
 
@@ -1102,7 +1102,7 @@ pub async fn import_csv_to_sql(
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out =
         File::create(&output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
-    let mut writer = BufWriter::new(out);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out);
 
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
@@ -1269,19 +1269,27 @@ fn extract_key_from_values(values_str: &str, col_index: usize) -> Option<String>
 
 /// Parse one INSERT line to extract (table_name, key_value).
 /// Returns None for non-INSERT lines or parse failures.
+/// Case-insensitive byte search without allocating a new String.
+/// Returns the byte offset of the first match in `haystack`, or None.
+#[inline]
+fn find_ci(haystack: &str, needle: &[u8]) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
+}
+
 fn parse_insert_key(
     line: &str,
     key_column: Option<&str>,
     key_col_index: Option<usize>, // 1-based
 ) -> Option<(String, String)> {
-    // Crude but fast: look for INSERT INTO pattern
-    let upper = line.to_uppercase();
-    let into_pos = upper.find("INSERT")?;
+    let into_pos = find_ci(line, b"INSERT")?;
     let rest = &line[into_pos..];
 
     // Skip "INSERT" then whitespace
     let rest = rest[6..].trim_start();
-    if !rest.to_uppercase().starts_with("INTO") {
+    if !rest.as_bytes().get(..4).map_or(false, |w| w.eq_ignore_ascii_case(b"INTO")) {
         return None;
     }
     let rest = rest[4..].trim_start();
@@ -1297,9 +1305,9 @@ fn parse_insert_key(
 
     // Optional column list
     let mut col_idx: Option<usize> = None;
-    let rest = if rest.starts_with('(') && !rest.to_uppercase().contains("VALUES") {
+    let rest = if rest.starts_with('(') && find_ci(rest, b"VALUES").is_none() {
         // Check if this is a column list (before VALUES)
-        let values_pos = rest.to_uppercase().find("VALUES")?;
+        let values_pos = find_ci(rest, b"VALUES")?;
         let col_section = &rest[1..]; // skip opening '('
         if let Some(close) = col_section.find(')') {
             if close < values_pos {
@@ -1329,7 +1337,7 @@ fn parse_insert_key(
     };
 
     // Find VALUES (
-    let values_pos = rest.to_uppercase().find("VALUES")?;
+    let values_pos = find_ci(rest, b"VALUES")?;
     let after_values = rest[values_pos + 6..].trim_start();
     if !after_values.starts_with('(') {
         return None;
@@ -1396,7 +1404,7 @@ pub async fn dedupe_sql(
     let file2 = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader2 = BufReader::with_capacity(BUF_CAPACITY, file2);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     bytes_read = 0;
     last_percent = 0;
@@ -1473,10 +1481,9 @@ fn tokenize_sql_values(s: &str) -> Vec<String> {
 
 /// Parse INSERT INTO line → (table_name, Option<Vec<col>>, Vec<value>)
 fn parse_insert_parts(line: &str) -> Option<(String, Option<Vec<String>>, Vec<String>)> {
-    let upper = line.to_uppercase();
-    let insert_pos = upper.find("INSERT")?;
+    let insert_pos = find_ci(line, b"INSERT")?;
     let rest = line[insert_pos + 6..].trim_start();
-    if !rest.to_uppercase().starts_with("INTO") { return None; }
+    if !rest.as_bytes().get(..4).map_or(false, |w| w.eq_ignore_ascii_case(b"INTO")) { return None; }
     let rest = rest[4..].trim_start();
 
     // Table name
@@ -1488,8 +1495,7 @@ fn parse_insert_parts(line: &str) -> Option<(String, Option<Vec<String>>, Vec<St
         (rest[..end].to_string(), rest[end..].trim_start())
     };
 
-    let upper_rest = rest.to_uppercase();
-    let values_pos = upper_rest.find("VALUES")?;
+    let values_pos = find_ci(rest, b"VALUES")?;
     let before_values = &rest[..values_pos];
 
     let columns = if before_values.trim_start().starts_with('(') {
@@ -1640,7 +1646,7 @@ pub async fn rename_sql(
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
@@ -1710,7 +1716,7 @@ pub async fn offset_sql(
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     let rules_arc = std::sync::Arc::new(rules);
     let mut bytes_read: u64 = 0;
@@ -1944,7 +1950,7 @@ pub async fn convert_statements(
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     let exclude_set = std::sync::Arc::new(
         exclude_columns.iter().map(|c| c.to_lowercase()).collect::<std::collections::HashSet<String>>()
@@ -1966,7 +1972,7 @@ pub async fn convert_statements(
      -> Vec<(String, bool, bool)> {
         chunk.par_iter().map(|l| {
             let trimmed = l.trim_end();
-            if !trimmed.to_uppercase().contains("INSERT") {
+            if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
                 return (trimmed.to_string(), false, false);
             }
             if let Some((table, Some(cols), values)) = parse_insert_parts(trimmed) {
@@ -2063,7 +2069,7 @@ pub async fn merge_sql_files(
         .sum();
 
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     let mut seen_sets: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut bytes_read: u64 = 0;
@@ -2241,7 +2247,7 @@ pub async fn mask_sql(
     let file = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader = BufReader::with_capacity(BUF_CAPACITY, file);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
 
     let compiled = std::sync::Arc::new(compile_mask_rules(&rules));
     let mut bytes_read: u64 = 0;
@@ -2254,7 +2260,7 @@ pub async fn mask_sql(
     let process_mask_chunk = |chunk: &[String], rules: &[CompiledMaskRule]| -> Vec<(String, bool, Vec<String>)> {
         chunk.par_iter().map(|l| {
             let trimmed = l.trim_end();
-            if !trimmed.to_uppercase().contains("INSERT") {
+            if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
                 return (trimmed.to_string(), false, vec![]);
             }
             if let Some((table, Some(cols), mut values)) = parse_insert_parts(trimmed) {

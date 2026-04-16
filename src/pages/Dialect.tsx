@@ -4,7 +4,8 @@ import { SqlEditor } from "@/components/SqlEditor";
 import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
-import { buildDialectRules, convertDialect, type DialectRule } from "@/lib/sql/dialect";
+import { buildDialectRules, type DialectRule, type ConvertDialectResult } from "@/lib/sql/dialect";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 
 export function Dialect() {
   const [input, setInput] = useState("");
@@ -12,6 +13,7 @@ export function Dialect() {
   const [result, setResult] = useState<{ sql: string; meta: string } | null>(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { call } = useSqlWorker();
 
   const hasInput = !!input.trim();
 
@@ -25,9 +27,8 @@ export function Dialect() {
     setError(null);
     setResult(null);
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, appliedRules } = convertDialect(input, rules);
+      const { sql, appliedRules } = await call<ConvertDialectResult>("dialect", { sql: input, rules });
       if (appliedRules.length === 0) {
         setError("未检测到可转换的 MySQL 语法");
         return;

@@ -7,7 +7,8 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CheckCircle, Loader2, Plus, Trash2 } from "lucide-react";
-import { offsetSql, type OffsetRule } from "@/lib/sql/offset";
+import { type OffsetRule, type OffsetResult } from "@/lib/sql/offset";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
 import { ProgressBar } from "@/components/ProgressBar";
 
@@ -30,6 +31,7 @@ export function Offset() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
   const validRules = rules.filter((r) => r.column.trim() !== "");
   const canExecute = hasInput && !processing && validRules.length > 0;
@@ -90,9 +92,8 @@ export function Offset() {
     }
 
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, modifiedCount, skippedCount, warnings: w } = offsetSql(input, validRules);
+      const { sql, modifiedCount, skippedCount, warnings: w } = await call<OffsetResult>("offset", { sql: input, rules: validRules });
       setResult({
         sql,
         meta: `已偏移 ${modifiedCount} 条语句${skippedCount > 0 ? `，跳过 ${skippedCount} 条（非数值）` : ""}`,

@@ -1,7 +1,7 @@
 import {
   GitMerge, Scissors, Files, Sparkles, ArrowLeftRight, Filter,
   CopyMinus, Replace, MoveRight, BarChart2, RefreshCw,
-  FolderGit2, Languages, GitCompare,
+  FolderGit2, Languages, GitCompare, ShieldOff,
   Sun, Moon
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "filemerge",   label: "多合一", Icon: FolderGit2 },
   { id: "dialect",     label: "方言",   Icon: Languages },
   { id: "diff",        label: "Diff",   Icon: GitCompare },
+  { id: "mask",        label: "脱敏",   Icon: ShieldOff },
 ];
 
 interface SidebarProps {

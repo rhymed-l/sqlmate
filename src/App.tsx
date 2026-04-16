@@ -14,11 +14,12 @@ import { ConvertStmt } from "@/pages/ConvertStmt";
 import { FileMerge } from "@/pages/FileMerge";
 import { Dialect } from "@/pages/Dialect";
 import { Diff } from "@/pages/Diff";
+import { Mask } from "@/pages/Mask";
 
 type PageId =
   | "merge" | "split" | "segment" | "format" | "extract" | "convert"
   | "dedupe" | "rename" | "offset" | "stats" | "convertstmt"
-  | "filemerge" | "dialect" | "diff";
+  | "filemerge" | "dialect" | "diff" | "mask";
 
 const PAGES: Record<PageId, React.ComponentType> = {
   merge: Merge,
@@ -35,6 +36,7 @@ const PAGES: Record<PageId, React.ComponentType> = {
   filemerge: FileMerge,
   dialect: Dialect,
   diff: Diff,
+  mask: Mask,
 };
 
 export default function App() {

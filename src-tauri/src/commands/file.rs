@@ -1971,3 +1971,172 @@ pub async fn merge_sql_files(
     writer.flush().map_err(|e| e.to_string())?;
     Ok(MergeFilesStats { total_lines })
 }
+
+// ─── mask_sql ──────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MaskRuleInput {
+    pub column: String,
+    pub mask_type: String,
+    pub custom_value: Option<String>,
+    pub regex_pattern: Option<String>,
+    pub regex_replace: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MaskStats {
+    pub masked_count: usize,
+    pub warnings: Vec<String>,
+}
+
+fn hash_seed(s: &str) -> u64 {
+    let mut h: u64 = 5381;
+    for c in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(c as u64);
+    }
+    h
+}
+
+fn fake_phone(seed: &str) -> String {
+    let h = hash_seed(seed);
+    let prefixes = [
+        "130", "131", "132", "133", "135", "136", "137", "138", "139",
+        "150", "151", "152", "153", "155", "158", "159", "176", "177",
+        "178", "180", "181", "182", "183", "185", "186", "187", "188",
+    ];
+    let prefix = prefixes[(h as usize) % prefixes.len()];
+    let rest = format!("{:08}", (h.wrapping_mul(1234567)) % 100_000_000);
+    format!("{}{}", prefix, rest)
+}
+
+fn fake_email(seed: &str) -> String {
+    let h = hash_seed(seed);
+    format!("user_{}@example.com", h % 100_000)
+}
+
+fn fake_id_card(seed: &str) -> String {
+    let h = hash_seed(seed);
+    let area = 100_000 + (h % 900_000);
+    let year = 1970 + (h % 40);
+    let month = 1 + (h % 12);
+    let day = 1 + (h % 28);
+    let seq = 1 + (h % 999);
+    format!("{}{}{:02}{:02}{:03}X", area, year, month, day, seq)
+}
+
+fn fake_name(seed: &str) -> String {
+    let surnames = ["王", "李", "张", "刘", "陈", "杨", "黄", "赵", "吴", "周"];
+    let givens = ["伟", "芳", "娜", "静", "丽", "强", "磊", "洋", "涛", "明"];
+    let h = hash_seed(seed) as usize;
+    format!("{}{}", surnames[h % surnames.len()], givens[(h >> 4) % givens.len()])
+}
+
+fn apply_mask(original: &str, rule: &MaskRuleInput, cache: &mut HashMap<String, String>) -> String {
+    let is_quoted = original.starts_with('\'') && original.ends_with('\'');
+    let inner = if is_quoted {
+        original[1..original.len() - 1].replace("''", "'")
+    } else {
+        original.to_string()
+    };
+
+    let cache_key = format!("{}:{}:{}", rule.column, rule.mask_type, inner);
+    let fake_inner = if let Some(cached) = cache.get(&cache_key) {
+        cached.clone()
+    } else {
+        let fake = match rule.mask_type.as_str() {
+            "phone" => fake_phone(&cache_key),
+            "email" => fake_email(&cache_key),
+            "id_card" => fake_id_card(&cache_key),
+            "name" => fake_name(&cache_key),
+            "custom_mask" => rule.custom_value.clone().unwrap_or_else(|| "***".to_string()),
+            "regex_replace" => {
+                if let Some(pattern) = &rule.regex_pattern {
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        let repl = rule.regex_replace.as_deref().unwrap_or("***");
+                        re.replace_all(&inner, repl).to_string()
+                    } else { inner.clone() }
+                } else { inner.clone() }
+            }
+            _ => inner.clone(),
+        };
+        cache.insert(cache_key, fake.clone());
+        fake
+    };
+
+    if is_quoted {
+        format!("'{}'", fake_inner.replace('\'', "''"))
+    } else {
+        fake_inner
+    }
+}
+
+#[tauri::command]
+pub async fn mask_sql(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    rules: Vec<MaskRuleInput>,
+) -> Result<MaskStats, String> {
+    let total_bytes = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0);
+    let file = File::open(&input_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut bytes_read: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut masked_count = 0usize;
+    let mut warning_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cache: HashMap<String, String> = HashMap::new();
+
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        bytes_read += line.len() as u64 + 1;
+        emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
+        let trimmed = line.trim_end();
+        let upper = trimmed.to_uppercase();
+
+        if !upper.contains("INSERT") {
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            continue;
+        }
+
+        if let Some((table, Some(cols), mut values)) = parse_insert_parts(trimmed) {
+            let mut line_modified = false;
+            for rule in &rules {
+                let idx = cols.iter().position(|c| c.to_lowercase() == rule.column.to_lowercase());
+                match idx {
+                    None => {
+                        warning_set.insert(format!("列 \"{}\" 不存在，已跳过", rule.column));
+                    }
+                    Some(i) => {
+                        let original = values[i].clone();
+                        let masked = apply_mask(&original, rule, &mut cache);
+                        if masked != original {
+                            values[i] = masked;
+                            line_modified = true;
+                        }
+                    }
+                }
+            }
+
+            if line_modified {
+                masked_count += 1;
+                let col_part = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+                writeln!(writer, "INSERT INTO `{}` ({}) VALUES ({});",
+                    table, col_part, values.join(", "))
+                    .map_err(|e| e.to_string())?;
+            } else {
+                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+            }
+        } else {
+            writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(MaskStats {
+        masked_count,
+        warnings: warning_set.into_iter().collect(),
+    })
+}

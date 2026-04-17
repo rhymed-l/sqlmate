@@ -2,7 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { StepFlow } from "@/components/StepFlow";
-import { SqlEditor } from "@/components/SqlEditor";
+import { SqlEditor, type LargeFileInfo } from "@/components/SqlEditor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,15 +14,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { segmentSQL, type SegmentMode } from "@/lib/sql/segment";
-import { CheckCircle, FolderOpen } from "lucide-react";
+import { CheckCircle, FolderOpen, Loader2 } from "lucide-react";
+import { useStreamProgress } from "@/hooks/useStreamProgress";
+import { ProgressBar } from "@/components/ProgressBar";
 
 export function Segment() {
   const [input, setInput] = useState("");
+  const [largeFile, setLargeFile] = useState<LargeFileInfo | null>(null);
   const [mode, setMode] = useState<SegmentMode>("count");
   const [count, setCount] = useState(10000);
   const [sizeMB, setSizeMB] = useState(10);
   const [status, setStatus] = useState<{ fileCount: number; folder: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
+
+  const { progress, startProgress } = useStreamProgress();
+  const hasInput = !!input.trim() || !!largeFile;
 
   async function handleExecute() {
     setError(null);
@@ -30,14 +37,39 @@ export function Segment() {
       const folderPath = await open({ directory: true, title: "选择输出文件夹" });
       if (!folderPath || typeof folderPath !== "string") return;
 
-      const { files, fileCount } = segmentSQL(input, { mode, count, sizeMB });
-      await invoke("write_files_to_folder", {
-        folder: folderPath,
-        files: files.map((f) => [f.name, f.content]),
-      });
+      setProcessing(true);
+      await new Promise((r) => setTimeout(r, 0));
+
+      let fileCount: number;
+
+      if (largeFile) {
+        // Large file: Rust streaming — zero content passes through IPC
+        const stopProgress = await startProgress();
+        try {
+          fileCount = await invoke<number>("segment_file", {
+            inputPath: largeFile.path,
+            outputFolder: folderPath,
+            mode,
+            value: mode === "count" ? count : sizeMB,
+          });
+        } finally {
+          stopProgress();
+        }
+      } else {
+        // Small file: JS processing
+        const result = segmentSQL(input, { mode, count, sizeMB });
+        fileCount = result.fileCount;
+        await invoke("write_files_to_folder", {
+          folder: folderPath,
+          files: result.files.map((f) => [f.name, f.content]),
+        });
+      }
+
       setStatus({ fileCount, folder: folderPath });
     } catch (e) {
       setError(`操作失败: ${e}`);
+    } finally {
+      setProcessing(false);
     }
   }
 
@@ -51,6 +83,8 @@ export function Segment() {
             <SqlEditor
               value={input}
               onChange={setInput}
+              largeFile={largeFile}
+              onLargeFile={setLargeFile}
               placeholder="拖拽大 SQL 文件到此处，或点击选择文件..."
             />
           ),
@@ -97,13 +131,20 @@ export function Segment() {
               )}
               <Button
                 onClick={handleExecute}
-                disabled={!input.trim()}
+                disabled={!hasInput || processing}
                 className="bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-600 hover:to-violet-600 text-white shadow-md shadow-indigo-500/20"
               >
-                <FolderOpen className="w-4 h-4 mr-1.5" />
-                选择输出文件夹并执行
+                {processing ? (
+                  <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                ) : (
+                  <FolderOpen className="w-4 h-4 mr-1.5" />
+                )}
+                {processing ? "处理中..." : "选择输出文件夹并执行"}
               </Button>
               {error && <p className="text-xs text-destructive">{error}</p>}
+              {progress !== null && largeFile && (
+                <ProgressBar percent={progress} />
+              )}
             </div>
           ),
         },

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { StepFlow } from "@/components/StepFlow";
-import { SqlEditor } from "@/components/SqlEditor";
+import { SqlEditor, type LargeFileInfo } from "@/components/SqlEditor";
 import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Loader2 } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -15,14 +16,31 @@ import { formatSQL, DIALECT_OPTIONS, type SqlDialect } from "@/lib/sql/format";
 
 export function Format() {
   const [input, setInput] = useState("");
+  const [largeFile, setLargeFile] = useState<LargeFileInfo | null>(null);
   const [dialect, setDialect] = useState<SqlDialect>("mysql");
   const [indent, setIndent] = useState<2 | 4>(2);
   const [result, setResult] = useState<{ sql: string; meta?: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
 
-  function handleExecute() {
-    const { sql, success, warning } = formatSQL(input, { dialect, indent });
-    setResult({ sql, meta: warning });
-    if (!success) console.warn(warning);
+  const hasInput = !!input.trim() || !!largeFile;
+
+  async function handleExecute() {
+    // sql-formatter requires full content in memory — refuse files >10 MB
+    if (largeFile) {
+      setError("格式化不支持超过 10 MB 的文件，建议先用「分割」切分后逐段格式化");
+      return;
+    }
+    setError(null);
+    setProcessing(true);
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+      const { sql, success, warning } = formatSQL(input, { dialect, indent });
+      setResult({ sql, meta: warning });
+      if (!success) console.warn(warning);
+    } finally {
+      setProcessing(false);
+    }
   }
 
   return (
@@ -35,6 +53,8 @@ export function Format() {
             <SqlEditor
               value={input}
               onChange={setInput}
+              largeFile={largeFile}
+              onLargeFile={setLargeFile}
               placeholder="粘贴任意 SQL 语句，或拖拽文件..."
             />
           ),
@@ -79,11 +99,13 @@ export function Format() {
               </div>
               <Button
                 onClick={handleExecute}
-                disabled={!input.trim()}
+                disabled={!hasInput || processing}
                 className="bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-600 hover:to-violet-600 text-white shadow-md shadow-indigo-500/20"
               >
-                执行格式化
+                {processing && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />}
+                {processing ? "处理中..." : "执行格式化"}
               </Button>
+              {error && <p className="text-xs text-destructive">{error}</p>}
             </div>
           ),
         },

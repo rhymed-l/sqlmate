@@ -9,6 +9,9 @@ import { maskSql } from "@/lib/sql/mask";
 import { diffSql } from "@/lib/sql/diff";
 import { convertStatements } from "@/lib/sql/convert_stmt";
 import { convertDialect } from "@/lib/sql/dialect";
+import { mergeSQL } from "@/lib/sql/merge";
+import { splitSQL } from "@/lib/sql/split";
+import { formatSQL } from "@/lib/sql/format";
 
 type WorkerRequest = { id: number; type: string } & Record<string, unknown>;
 
@@ -42,6 +45,15 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
         break;
       case "dialect":
         result = convertDialect(payload.sql as string, payload.rules as Parameters<typeof convertDialect>[1]);
+        break;
+      case "merge":
+        result = mergeSQL(payload.sql as string, payload.options as Parameters<typeof mergeSQL>[1]);
+        break;
+      case "split":
+        result = splitSQL(payload.sql as string);
+        break;
+      case "format":
+        result = formatSQL(payload.sql as string, payload.options as Parameters<typeof formatSQL>[1]);
         break;
       default:
         throw new Error(`Unknown worker task: ${type}`);

@@ -1,4 +1,4 @@
-import { parseInsertLine } from "./dedupe";
+import { parseInsertLine, splitMultiRowInsert } from "./dedupe";
 
 export type ConvertMode = "update" | "mysql_upsert" | "pg_upsert" | "insert_ignore";
 
@@ -111,7 +111,9 @@ function convertLine(line: string, options: ConvertOptions): string | null {
 }
 
 export function convertStatements(sql: string, options: ConvertOptions): ConvertResult {
-  const lines = sql.split("\n");
+  // Expand multi-row INSERTs for modes that rewrite values; insert_ignore can
+  // work on the raw line but expansion keeps behaviour consistent.
+  const lines = sql.split("\n").flatMap(splitMultiRowInsert);
   let convertedCount = 0;
   let skippedCount = 0;
 
@@ -119,9 +121,13 @@ export function convertStatements(sql: string, options: ConvertOptions): Convert
     const trimmed = line.trimEnd();
     if (!/INSERT/i.test(trimmed)) return trimmed;
 
-    // insert_ignore: just inject IGNORE, no pk resolution needed
+    // insert_ignore: inject IGNORE, handle optional modifiers, skip if already present
     if (options.mode === "insert_ignore") {
-      const replaced = trimmed.replace(/INSERT\s+INTO\s+/i, "INSERT IGNORE INTO ");
+      if (/INSERT\s+IGNORE\b/i.test(trimmed)) return trimmed; // already has IGNORE
+      const replaced = trimmed.replace(
+        /INSERT(\s+(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY))?\s+INTO\b/i,
+        (_, mod) => `INSERT${mod ?? ""} IGNORE INTO`,
+      );
       if (replaced !== trimmed) { convertedCount++; return replaced; }
       return trimmed;
     }

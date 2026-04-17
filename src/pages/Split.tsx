@@ -6,8 +6,9 @@ import { SqlEditor, type LargeFileInfo } from "@/components/SqlEditor";
 import { ResultPanel } from "@/components/ResultPanel";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle } from "lucide-react";
-import { splitSQL } from "@/lib/sql/split";
+import type { SplitResult } from "@/lib/sql/split";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { ProgressBar } from "@/components/ProgressBar";
 
 interface LargeResult {
@@ -24,6 +25,7 @@ export function Split() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
 
   async function handleExecute() {
@@ -56,11 +58,10 @@ export function Split() {
       return;
     }
 
-    // Small file: JS processing
+    // Small file: worker processing
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, statementCount } = splitSQL(input);
+      const { sql, statementCount } = await call<SplitResult>("split", { sql: input });
       if (!sql) { setError("未识别到有效的批量 INSERT 语句"); return; }
       setResult({ sql, meta: `共拆分出 ${statementCount} 条语句` });
     } catch (e) {

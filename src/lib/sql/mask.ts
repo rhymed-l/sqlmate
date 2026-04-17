@@ -1,4 +1,4 @@
-import { parseInsertLine } from "./dedupe";
+import { parseInsertLine, splitMultiRowInsert } from "./dedupe";
 
 export type MaskType =
   | "phone"
@@ -131,7 +131,7 @@ export function maskSql(sql: string, rules: MaskRule[]): MaskResult {
   }
 
   const cache: MaskCache = new Map();
-  const lines = sql.split("\n");
+  const lines = sql.split("\n").flatMap(splitMultiRowInsert);
   let maskedCount = 0;
   const warningSet = new Set<string>();
 

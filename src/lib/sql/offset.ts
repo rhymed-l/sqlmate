@@ -1,4 +1,4 @@
-import { parseInsertLine } from "./dedupe";
+import { parseInsertLine, splitMultiRowInsert } from "./dedupe";
 
 export interface OffsetRule {
   column: string;    // column name (takes priority if set)
@@ -72,7 +72,7 @@ export function offsetSql(sql: string, rules: OffsetRule[]): OffsetResult {
     return { sql, modifiedCount: 0, skippedCount: 0, warnings: [] };
   }
 
-  const lines = sql.split("\n");
+  const lines = sql.split("\n").flatMap(splitMultiRowInsert);
   let modifiedCount = 0;
   let skippedCount = 0;
   const warningSet = new Set<string>();

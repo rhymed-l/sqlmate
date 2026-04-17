@@ -12,7 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatSQL, DIALECT_OPTIONS, type SqlDialect } from "@/lib/sql/format";
+import { DIALECT_OPTIONS, type SqlDialect, type FormatResult } from "@/lib/sql/format";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 
 export function Format() {
   const [input, setInput] = useState("");
@@ -23,6 +24,7 @@ export function Format() {
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
 
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
 
   async function handleExecute() {
@@ -33,9 +35,8 @@ export function Format() {
     }
     setError(null);
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, success, warning } = formatSQL(input, { dialect, indent });
+      const { sql, success, warning } = await call<FormatResult>("format", { sql: input, options: { dialect, indent } });
       setResult({ sql, meta: warning });
       if (!success) console.warn(warning);
     } finally {

@@ -1,4 +1,4 @@
-import { parseInsertLine } from "./dedupe";
+import { parseInsertLine, splitMultiRowInsert } from "./dedupe";
 
 export type DiffStatus = "added" | "removed" | "modified" | "unchanged";
 
@@ -33,7 +33,7 @@ function extractRows(
   keyColIndex: number | undefined
 ): Map<string, ParsedRow> {
   const map = new Map<string, ParsedRow>();
-  for (const line of sql.split("\n")) {
+  for (const line of sql.split("\n").flatMap(splitMultiRowInsert)) {
     const trimmed = line.trimEnd();
     if (!/^INSERT\s+INTO\s+/i.test(trimmed)) continue;
     const parsed = parseInsertLine(trimmed);

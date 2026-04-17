@@ -61,6 +61,47 @@ export function parseSqlValues(valStr: string): string[] {
 // Supports:
 //   INSERT INTO `t` (`a`, `b`) VALUES ('x', 1);
 //   INSERT INTO `t` VALUES ('x', 1);
+/**
+ * If `line` is a multi-row INSERT (VALUES (a),(b),...), returns individual
+ * single-row INSERT strings. Returns [line] for single-row or non-INSERT lines.
+ */
+export function splitMultiRowInsert(line: string): string[] {
+  const trimmed = line.trimEnd();
+  const m = /\bVALUES\b/i.exec(trimmed);
+  if (!m) return [trimmed];
+
+  const prefixEnd = m.index + m[0].length;
+  const prefix = trimmed.slice(0, prefixEnd);
+  const rest = trimmed.slice(prefixEnd).trimStart();
+
+  // Walk character-by-character, collecting top-level (...) groups.
+  const tuples: string[] = [];
+  let depth = 0;
+  let inStr = false;
+  let start = -1;
+
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    if (inStr) {
+      if (ch === "'" && rest[i + 1] === "'") { i++; continue; } // '' escape
+      if (ch === "'") inStr = false;
+      continue;
+    }
+    if (ch === "'") { inStr = true; continue; }
+    if (ch === "(") { if (depth === 0) start = i; depth++; }
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        tuples.push(rest.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  if (tuples.length <= 1) return [trimmed];
+  return tuples.map((t) => `${prefix} ${t};`);
+}
+
 export function parseInsertLine(line: string): ParsedInsert | null {
   // Match INSERT INTO `tableName` (optional column list) VALUES (values)
   const re =
@@ -114,7 +155,8 @@ function extractKey(
 
 export function dedupeSql(sql: string, options: DedupeOptions): DedupeResult {
   const { keyColumn, keyColIndex, keepLast = true } = options;
-  const lines = sql.split("\n");
+  // Expand multi-row INSERTs so each logical row gets its own index.
+  const lines = sql.split("\n").flatMap(splitMultiRowInsert);
 
   // Pass 1 — build map from composite key → last (or first) line index
   // composite key: "tableName\0keyValue"

@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, CheckCircle } from "lucide-react";
-import { mergeSQL } from "@/lib/sql/merge";
+import type { MergeResult } from "@/lib/sql/merge";
 import { useStreamProgress } from "@/hooks/useStreamProgress";
+import { useSqlWorker } from "@/hooks/useSqlWorker";
 import { ProgressBar } from "@/components/ProgressBar";
 
 interface LargeResult {
@@ -28,6 +29,7 @@ export function Merge() {
   const [processing, setProcessing] = useState(false);
 
   const { progress, startProgress } = useStreamProgress();
+  const { call } = useSqlWorker();
   const hasInput = !!input.trim() || !!largeFile;
 
   async function handleExecute() {
@@ -64,11 +66,10 @@ export function Merge() {
       return;
     }
 
-    // Small file: JS processing
+    // Small file: worker processing
     setProcessing(true);
-    await new Promise((r) => setTimeout(r, 0));
     try {
-      const { sql, tableCount, statementCount } = mergeSQL(input, { batchSize });
+      const { sql, tableCount, statementCount } = await call<MergeResult>("merge", { sql: input, options: { batchSize } });
       if (!sql) { setError("未识别到有效的 INSERT 语句"); return; }
       setResult({ sql, meta: `共处理 ${tableCount} 张表，生成 ${statementCount} 条语句` });
     } catch (e) {

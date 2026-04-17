@@ -1269,6 +1269,29 @@ fn extract_key_from_values(values_str: &str, col_index: usize) -> Option<String>
 
 /// Parse one INSERT line to extract (table_name, key_value).
 /// Returns None for non-INSERT lines or parse failures.
+/// If `line` is a multi-row INSERT (VALUES (a),(b),...), returns individual
+/// single-row INSERT strings. Returns a single-element Vec for single-row
+/// INSERTs or non-INSERT lines.  Uses the existing `split_value_tuples` helper.
+fn split_multi_row_insert(line: &str) -> Vec<String> {
+    let values_pos = match find_ci(line, b"VALUES") {
+        Some(p) => p,
+        None => return vec![line.to_string()],
+    };
+    let prefix = &line[..values_pos + 6]; // everything up to and including "VALUES"
+    let after = line[values_pos + 6..].trim_start();
+    let tuples = split_value_tuples(after.as_bytes());
+    if tuples.len() <= 1 {
+        return vec![line.to_string()];
+    }
+    tuples
+        .iter()
+        .map(|t| {
+            let s = std::str::from_utf8(t).unwrap_or(after);
+            format!("{} {};", prefix, s)
+        })
+        .collect()
+}
+
 /// Case-insensitive byte search without allocating a new String.
 /// Returns the byte offset of the first match in `haystack`, or None.
 #[inline]
@@ -1365,10 +1388,11 @@ pub async fn dedupe_sql(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    // Pass 1: build map from (table, key_value) → line_number
+    // Pass 1: build map from (table, key_value) → (line_no, sub_idx)
+    // Multi-row INSERTs are expanded so each value tuple is tracked independently.
     let file1 = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader1 = BufReader::with_capacity(BUF_CAPACITY, file1);
-    let mut key_to_line: HashMap<(String, String), usize> = HashMap::new();
+    let mut key_to_pos: HashMap<(String, String), (usize, usize)> = HashMap::new();
     let mut original_count = 0usize;
     let mut bytes_read: u64 = 0;
     let mut last_percent: u8 = 0;
@@ -1379,32 +1403,28 @@ pub async fn dedupe_sql(
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
 
         let trimmed = line.trim_end();
-        let upper = trimmed.to_uppercase();
-        if !upper.contains("INSERT") {
-            continue;
-        }
+        if find_ci(trimmed, b"INSERT").is_none() { continue; }
 
-        if let Some((table, key)) = parse_insert_key(
-            trimmed,
-            key_column.as_deref(),
-            key_col_index,
-        ) {
-            original_count += 1;
-            let composite = (table, key);
-            if !key_to_line.contains_key(&composite) || keep_last {
-                key_to_line.insert(composite, line_no);
+        let sub_rows = split_multi_row_insert(trimmed);
+        for (sub_idx, sub_row) in sub_rows.iter().enumerate() {
+            if let Some((table, key)) = parse_insert_key(sub_row, key_column.as_deref(), key_col_index) {
+                original_count += 1;
+                let composite = (table, key);
+                if !key_to_pos.contains_key(&composite) || keep_last {
+                    key_to_pos.insert(composite, (line_no, sub_idx));
+                }
             }
         }
     }
 
-    let kept_lines: std::collections::HashSet<usize> =
-        key_to_line.values().copied().collect();
+    let kept_set: std::collections::HashSet<(usize, usize)> =
+        key_to_pos.values().copied().collect();
 
-    // Pass 2: write kept lines
+    // Pass 2: write kept sub-rows, expanding multi-row INSERTs
     let file2 = File::open(&input_path).map_err(|e| e.to_string())?;
     let reader2 = BufReader::with_capacity(BUF_CAPACITY, file2);
     let out_file = File::create(&output_path).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::with_capacity(BUF_CAPACITY,out_file);
+    let mut writer = BufWriter::with_capacity(BUF_CAPACITY, out_file);
 
     bytes_read = 0;
     last_percent = 0;
@@ -1416,12 +1436,28 @@ pub async fn dedupe_sql(
         emit_progress(&app, bytes_read, total_bytes, &mut last_percent);
 
         let trimmed = line.trim_end();
-        let upper = trimmed.to_uppercase();
-
-        if upper.contains("INSERT") && parse_insert_key(trimmed, key_column.as_deref(), key_col_index).is_some() {
-            if kept_lines.contains(&line_no) {
-                writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
-                kept_count += 1;
+        if find_ci(trimmed, b"INSERT").is_some() {
+            let sub_rows = split_multi_row_insert(trimmed);
+            if sub_rows.len() == 1 {
+                // Single-row line
+                if parse_insert_key(trimmed, key_column.as_deref(), key_col_index).is_some() {
+                    if kept_set.contains(&(line_no, 0)) {
+                        writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+                        kept_count += 1;
+                    }
+                } else {
+                    // INSERT but key not parseable — pass through
+                    writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
+                }
+            } else {
+                // Multi-row: write each kept or unparseable sub-row
+                for (sub_idx, sub_row) in sub_rows.iter().enumerate() {
+                    let parseable = parse_insert_key(sub_row, key_column.as_deref(), key_col_index).is_some();
+                    if !parseable || kept_set.contains(&(line_no, sub_idx)) {
+                        writeln!(writer, "{}", sub_row).map_err(|e| e.to_string())?;
+                        if parseable { kept_count += 1; }
+                    }
+                }
             }
         } else {
             writeln!(writer, "{}", trimmed).map_err(|e| e.to_string())?;
@@ -1661,7 +1697,8 @@ pub async fn rename_sql(
 
         if chunk.len() >= CHUNK_SIZE {
             let rules_ref = compiled.clone();
-            let results: Vec<(String, bool)> = chunk
+            let expanded: Vec<String> = chunk.iter().flat_map(|l| split_multi_row_insert(l.trim_end())).collect();
+            let results: Vec<(String, bool)> = expanded
                 .par_iter()
                 .map(|l| apply_compiled_rename(l.trim_end(), &rules_ref))
                 .collect();
@@ -1675,7 +1712,8 @@ pub async fn rename_sql(
     // Remaining lines
     if !chunk.is_empty() {
         let rules_ref = compiled.clone();
-        let results: Vec<(String, bool)> = chunk
+        let expanded: Vec<String> = chunk.iter().flat_map(|l| split_multi_row_insert(l.trim_end())).collect();
+        let results: Vec<(String, bool)> = expanded
             .par_iter()
             .map(|l| apply_compiled_rename(l.trim_end(), &rules_ref))
             .collect();
@@ -1728,7 +1766,8 @@ pub async fn offset_sql(
 
     // Returns (output_line, modified, skipped, warnings)
     let process_offset_chunk = |chunk: &[String], rules: &[OffsetRuleInput]| -> Vec<(String, bool, bool, Vec<String>)> {
-        chunk.par_iter().map(|l| {
+        let expanded: Vec<String> = chunk.iter().flat_map(|l| split_multi_row_insert(l.trim_end())).collect();
+        expanded.par_iter().map(|l| {
             let trimmed = l.trim_end();
             if let Some((table, columns, mut values)) = parse_insert_parts(trimmed) {
                 let mut line_modified = false;
@@ -1970,18 +2009,31 @@ pub async fn convert_statements(
                                   pk_col_name: &str,
                                   excl: &std::collections::HashSet<String>|
      -> Vec<(String, bool, bool)> {
-        chunk.par_iter().map(|l| {
+        let expanded: Vec<String> = chunk.iter().flat_map(|l| split_multi_row_insert(l.trim_end())).collect();
+        expanded.par_iter().map(|l| {
             let trimmed = l.trim_end();
             if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
                 return (trimmed.to_string(), false, false);
             }
-            // insert_ignore: inject IGNORE keyword, no column parsing needed
+            // insert_ignore: inject IGNORE keyword between INSERT [modifiers] and INTO.
+            // Handles LOW_PRIORITY / DELAYED / HIGH_PRIORITY; skips lines already containing IGNORE.
             if mode == "insert_ignore" {
                 if let Some(ins) = find_ci(trimmed, b"INSERT") {
                     let after_ins = trimmed[ins + 6..].trim_start();
-                    if after_ins.as_bytes().get(..4).map_or(false, |w| w.eq_ignore_ascii_case(b"INTO")) {
-                        let into_end = trimmed.len() - after_ins.len() + 4;
-                        return (format!("INSERT IGNORE INTO{}", &trimmed[into_end..]), true, false);
+                    if let Some(into_off) = find_ci(after_ins, b"INTO") {
+                        let between = after_ins[..into_off].trim();
+                        // Already has IGNORE — nothing to do
+                        if find_ci(between, b"IGNORE").is_some() {
+                            return (trimmed.to_string(), false, false);
+                        }
+                        let prefix = &trimmed[..ins];
+                        let after_into = &after_ins[into_off + 4..];
+                        let result = if between.is_empty() {
+                            format!("{}INSERT IGNORE INTO{}", prefix, after_into)
+                        } else {
+                            format!("{}INSERT {} IGNORE INTO{}", prefix, between, after_into)
+                        };
+                        return (result, true, false);
                     }
                 }
                 return (trimmed.to_string(), false, false);
@@ -2269,7 +2321,8 @@ pub async fn mask_sql(
 
     // Returns (output_line, was_masked, warnings)
     let process_mask_chunk = |chunk: &[String], rules: &[CompiledMaskRule]| -> Vec<(String, bool, Vec<String>)> {
-        chunk.par_iter().map(|l| {
+        let expanded: Vec<String> = chunk.iter().flat_map(|l| split_multi_row_insert(l.trim_end())).collect();
+        expanded.par_iter().map(|l| {
             let trimmed = l.trim_end();
             if !trimmed.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"INSERT")) {
                 return (trimmed.to_string(), false, vec![]);

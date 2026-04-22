@@ -3,9 +3,14 @@ name: Build
 on:
   push:
     branches: [master, main]
+    tags:
+      - "v*"
 
 jobs:
   build:
+    permissions:
+      contents: write
+
     strategy:
       fail-fast: false
       matrix:
@@ -49,9 +54,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "SQLMate ${{ github.ref_name }}"
+          releaseBody: "See [CHANGELOG](https://github.com/rhymed-l/sqlmate/blob/master/CHANGELOG.md) for details."
+          releaseDraft: false
+          prerelease: false
           args: --target ${{ matrix.target }}
 
-      - name: Upload artifacts
+      - name: Upload artifacts (branch builds)
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: SQLMate-${{ matrix.label }}

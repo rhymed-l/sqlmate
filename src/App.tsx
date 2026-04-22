@@ -15,11 +15,12 @@ import { FileMerge } from "@/pages/FileMerge";
 import { Dialect } from "@/pages/Dialect";
 import { Diff } from "@/pages/Diff";
 import { Mask } from "@/pages/Mask";
+import { DdlDiff } from "@/pages/DdlDiff";
 
 type PageId =
   | "merge" | "split" | "segment" | "format" | "extract" | "convert"
   | "dedupe" | "rename" | "offset" | "stats" | "convertstmt"
-  | "filemerge" | "dialect" | "diff" | "mask";
+  | "filemerge" | "dialect" | "diff" | "mask" | "ddldiff";
 
 const PAGES: Record<PageId, React.ComponentType> = {
   merge: Merge,
@@ -37,6 +38,7 @@ const PAGES: Record<PageId, React.ComponentType> = {
   dialect: Dialect,
   diff: Diff,
   mask: Mask,
+  ddldiff: DdlDiff,
 };
 
 export default function App() {

@@ -1,0 +1,42 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e6]: S
+    - navigation [ref=e7]:
+      - button "合并" [ref=e8] [cursor=pointer]:
+        - img [ref=e9]
+        - text: 合并
+      - button "拆分" [ref=e13] [cursor=pointer]:
+        - img [ref=e14]
+        - text: 拆分
+      - button "分割" [ref=e20] [cursor=pointer]:
+        - img [ref=e21]
+        - text: 分割
+      - button "格式化" [ref=e25] [cursor=pointer]:
+        - img [ref=e26]
+        - text: 格式化
+    - button "切换深色模式" [ref=e29] [cursor=pointer]:
+      - img [ref=e30]
+  - main [ref=e32]:
+    - generic [ref=e33]:
+      - generic [ref=e34]:
+        - generic [ref=e36]: "1"
+        - generic [ref=e38]:
+          - paragraph [ref=e39]: 输入 SQL
+          - generic [ref=e40]:
+            - textbox "粘贴多条 INSERT INTO 语句，或拖拽 .sql / .txt 文件..." [ref=e42]
+            - button "选择文件" [ref=e44] [cursor=pointer]:
+              - img
+              - text: 选择文件
+      - generic [ref=e45]:
+        - generic [ref=e47]: "2"
+        - generic [ref=e49]:
+          - paragraph [ref=e50]: 配置参数
+          - generic [ref=e51]:
+            - generic [ref=e52]: 每批条数
+            - spinbutton [ref=e53]: "1000"
+            - button "执行合并" [disabled]
+      - generic [ref=e54]:
+        - generic [ref=e56]: "3"
+        - generic [ref=e57]:
+          - paragraph [ref=e58]: 查看结果
+          - paragraph [ref=e59]: 执行后结果将显示在这里...

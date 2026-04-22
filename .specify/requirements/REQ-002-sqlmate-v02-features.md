@@ -1,6 +1,6 @@
 # REQ-002: SQLMate v0.2 — 数据处理扩展功能集
 
-> 创建时间: 2026-04-15 | 状态: 待实现 | 阶段: 需求规划
+> 创建时间: 2026-04-15 | 状态: 迭代中 | 阶段: 扩展功能持续实现
 
 ## 需求背景
 
@@ -309,8 +309,24 @@ Sprint 6: F-11（方言转换） + F-12（SQL Diff）
 | F-10 文件统计分析 | ✅ 已完成 | v1.4 |
 | F-11 方言转换 | ✅ 已完成 | v1.5 |
 | F-12 SQL Diff | ✅ 已完成 | v1.5 |
+| F-13 DDL Diff & ALTER SQL 生成 | ✅ 已完成 | v1.8 |
 
 ## 变更记录
+
+### v1.8 — 2026-04-21 — F-13 DDL Diff & ALTER SQL 生成
+
+- **分支**: master | **提交**: (待提交)
+- **变更摘要**:
+  - `ddl_diff.ts`: DDL 解析器（parseDDL）支持 MySQL/PostgreSQL/Oracle 语法；差异计算器（diffDDL）对比字段新增/删除/修改、索引新增/删除/修改；ALTER SQL 生成器（generateAlterSql）支持三种方言
+  - `ddl_diff.test.ts`: 25 个测试，全部通过（总计 177 个）
+  - `DdlDiff.tsx`: 3 步 StepFlow UI — 左右 DDL 输入、方言+索引配置、差异卡片展示 + ALTER SQL 复制/保存
+  - `Sidebar.tsx`: 新增"DDL对比"导航项（FileDiff 图标）
+  - `App.tsx`: 注册 ddldiff 页面
+- **业务规则**:
+  - 每个输入框只支持单张表 DDL，多表时抛出错误
+  - 索引对比默认开启，可独立关闭
+  - 支持方言：MySQL（MODIFY COLUMN / ADD/DROP INDEX）、PostgreSQL（ALTER COLUMN TYPE / CREATE INDEX / DROP INDEX IF EXISTS）、Oracle（MODIFY / CREATE INDEX）
+  - 字段比较：先规范化（大写、折叠空白），相同则忽略
 
 ### v1.7 — 2026-04-16 — F-05 数据脱敏
 
